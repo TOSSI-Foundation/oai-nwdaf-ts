@@ -1,0 +1,27 @@
+#/*
+# * SPDX-License-Identifier: LicenseRef-CSSL-1.0
+# */
+
+ARG BUILD_IMAGE=golang:1.19-alpine
+ARG TARGET_IMAGE=alpine:3.18
+
+#---------------------------------------------------------------------
+# BUILDER IMAGE
+#---------------------------------------------------------------------
+FROM $BUILD_IMAGE AS oai-nwdaf-engine-build
+WORKDIR /oai/nwdaf/engine
+ENV CGO_ENABLED=0
+COPY go.* ./
+RUN go mod download
+COPY . ./
+RUN go build -o bin/oai-nwdaf-engine cmd/oai-nwdaf-engine/main.go
+
+#---------------------------------------------------------------------
+# TARGET IMAGE
+#---------------------------------------------------------------------
+FROM $TARGET_IMAGE AS oai-nwdaf-engine
+RUN apk update && apk add -U net-tools curl bash
+COPY --from=oai-nwdaf-engine-build /oai/nwdaf/engine/bin/oai-nwdaf-engine ./
+COPY .env ./
+EXPOSE 8080/tcp
+ENTRYPOINT ["./oai-nwdaf-engine"]

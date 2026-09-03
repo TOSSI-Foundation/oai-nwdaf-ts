@@ -1,0 +1,14 @@
+This project is a derivative work of OpenAirInterface CN5G.
+
+  Upstream : https://gitlab.eurecom.fr/oai/cn5g
+  License  : Collaborative Standards Software License v1.0 (CSSL-1.0), see LICENSE
+
+The NWDAF services under nwdaf/ are modified from oai-cn5g-nwdaf (branch develop,
+commit 9d82b7547586a6e04dc0719ef18910ea01fcd9e7).
+
+Changes to the OAI network functions are distributed as patches under patches/,
+each pinned to the upstream commit it applies to. The upstream repositories are
+not vendored here. AMF, UPF-VPP, UDR, UDM and AUSF are used unmodified.
+
+UE credentials in compose/ (KEY, OPc, IMSI) are OpenAirInterface's public
+tutorial test vectors, not secrets.

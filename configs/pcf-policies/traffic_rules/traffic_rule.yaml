@@ -1,0 +1,22 @@
+steering-scenario-primary:
+  routeToLocs:
+    - dnai: access
+    - dnai: internet-primary
+
+steering-scenario-secondary:
+  routeToLocs:
+    - dnai: access
+    - dnai: internet-secondary
+
+# Authorizes BOTH N6 DNAIs for one session so the SMF may (re)select between
+# them. TS 23.503 clause 6 ("AF influenced Traffic Steering Enforcement
+# Control"): a PCC rule carries "a set of DNAI(s) (i.e. a reference to the
+# DNAI(s) the SMF needs to consider for UPF selection/reselection)".
+# 'access' is kept because it is the N3/access-side DNAI of the same DNN; the
+# SMF's apply_steering_dnai() ignores any DNAI that does not resolve to an N6
+# network instance, so listing it here is safe.
+steering-scenario-both:
+  routeToLocs:
+    - dnai: access
+    - dnai: internet-primary
+    - dnai: internet-secondary

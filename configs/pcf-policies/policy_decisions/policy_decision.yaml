@@ -1,0 +1,12 @@
+decision_supi1:
+  supi_imsi: "208950000000032"
+  pcc_rules: 
+    # Both N6 DNAIs authorized so the SMF NWDAF consumer has a real choice to
+    # make. Was steering-rule-primary, which authorized internet-primary only -
+    # the SMF could then never legally select internet-secondary.
+    - steering-rule-both
+
+decision_supi2:
+  supi_imsi: "208950000000033"
+  pcc_rules: 
+    - steering-rule-secondary

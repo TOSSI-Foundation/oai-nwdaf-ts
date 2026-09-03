@@ -1,0 +1,43 @@
+# NRF: store nfType=NWDAF so target-nf-type=NWDAF discovery works
+#
+# Upstream : https://gitlab.eurecom.fr/oai/cn5g/oai-cn5g-nrf.git
+# Base     : b38f13d82ba7885930f899993c0257940021cf40
+# Apply    : git checkout b38f13d82ba7885930f899993c0257940021cf40 && git apply <this file>
+#
+# Upstream never assigned nf_type for NWDAF, so profiles were stored as UNKNOWN
+# and discovery returned an empty list. TS 23.288 clause 5.2.
+#
+diff --git a/src/common-src b/src/common-src
+--- a/src/common-src
++++ b/src/common-src
+@@ -1 +1 @@
+-Subproject commit 2c270464e301789f037487f014587e814c60660b
++Subproject commit 2c270464e301789f037487f014587e814c60660b-dirty
+diff --git a/src/common/api_conversions.cpp b/src/common/api_conversions.cpp
+index b54f1d1..270487d 100644
+--- a/src/common/api_conversions.cpp
++++ b/src/common/api_conversions.cpp
+@@ -482,6 +482,23 @@ bool api_conv::profile_api_to_nrf_profile(
+           .get()
+           ->add_pcf_info(info);
+     } break;
++    case NF_TYPE_NWDAF: {
++      // TS 23.288 clause 5.2 (NWDAF Discovery and Selection) requires a
++      // consumer to find an NWDAF through the NRF using target-nf-type=NWDAF.
++      // Upstream OAI never assigns nf_type for NWDAF: the switch above sets it
++      // only for AMF/SMF/UPF/AUSF/UDM/UDR/PCF and every other type fell into
++      // the empty default below, so an NWDAF profile was stored with
++      // nfType=UNKNOWN and a target-nf-type=NWDAF discovery returned an empty
++      // nfInstances list even though registration had returned 201.
++      //
++      // Only the type is set here. The generic nrf_profile has no nwdafInfo
++      // member, so eventIds/nwdafEvents from the NF profile are still dropped
++      // and per-Analytics-ID discovery filtering remains unsupported - see
++      // docs/PROJECT-HISTORY.md. Discovery by NF type and by service name,
++      // which is what clause 5.2 needs for NF-related analytics, now works.
++      Logger::nrf_app().debug("\tNWDAF profile");
++      profile.get()->set_nf_type(NF_TYPE_NWDAF);
++    } break;
+     default: {
+     }
+   }

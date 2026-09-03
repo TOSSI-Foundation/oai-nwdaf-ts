@@ -1,0 +1,45 @@
+# NRF (common-src submodule): accept legacy serviceName 'namf_communication'
+#
+# Upstream : https://github.com/openairinterface/oai-cn5g-common-src.git
+# Base     : 2c270464e301789f037487f014587e814c60660b
+# Apply    : git checkout 2c270464e301789f037487f014587e814c60660b && git apply <this file>
+#
+# oai-amf:v2.0.0 registers with serviceName 'namf_communication'; the develop-branch
+# enum accepts only 'namf-comm' and threw, producing HTTP 400. The AMF then retried
+# every 20s, leaking a socket per attempt until its fd table saturated.
+# INGRESS ONLY - the NRF still stores and emits 'namf-comm'.
+# NOTE: this file lives in the src/common-src SUBMODULE, not the NRF repo.
+#
+diff --git a/model/ServiceName_anyOf.cpp b/model/ServiceName_anyOf.cpp
+index d3b0469e..54106609 100644
+--- a/model/ServiceName_anyOf.cpp
++++ b/model/ServiceName_anyOf.cpp
+@@ -473,6 +473,28 @@ void from_json(const nlohmann::json& j, ServiceName_anyOf& o) {
+     o.setValue(ServiceName_anyOf::eServiceName_anyOf::NUDM_UEID);
+   } else if (s == "namf-comm") {
+     o.setValue(ServiceName_anyOf::eServiceName_anyOf::NAMF_COMM);
++  } else if (s == "namf_communication") {
++    // BACKWARDS-COMPATIBILITY ALIAS, ingress only (project patch).
++    //
++    // TS 29.510 spells this ServiceName "namf-comm", and that is the ONLY
++    // spelling this NRF ever emits: the value is stored as NAMF_COMM and
++    // serialised by to_json() as "namf-comm". Nothing about the NRF's output
++    // changes here - this is leniency on what it will ACCEPT.
++    //
++    // oai-amf:v2.0.0 registers with "serviceName":"namf_communication" (a
++    // legacy spelling: underscore instead of hyphen, and the full word). The
++    // generated from_json() above has no branch for it, so it fell through to
++    // the final else and threw std::invalid_argument, which the SBI layer
++    // turns into a bodiless HTTP 400. The AMF therefore never registered and
++    // retried every 20s forever, leaking one socket per attempt until its file
++    // descriptor table saturated (measured: 1021/1024 fds, 1015 of them
++    // sockets against 2 live connections) - after which getaddrinfo() itself
++    // began to fail and the AMF logged "Could not resolve host: oai-nrf".
++    //
++    // Rejecting a legacy spelling from a peer we ship alongside buys nothing;
++    // accepting it costs one branch. See docs/IMPROVEMENT-ROADMAP.md
++    // Improvement 1 in the oai-cn5g-nwdaf repo.
++    o.setValue(ServiceName_anyOf::eServiceName_anyOf::NAMF_COMM);
+   } else if (s == "namf-evts") {
+     o.setValue(ServiceName_anyOf::eServiceName_anyOf::NAMF_EVTS);
+   } else if (s == "namf-mt") {

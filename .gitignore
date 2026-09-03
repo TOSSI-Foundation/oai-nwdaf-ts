@@ -1,0 +1,42 @@
+# --- build / runtime artifacts ---
+*.pyc
+__pycache__/
+venv/
+.venv/
+*.o
+*.so
+
+# --- logs & captures ---
+*.log
+nohup.out
+*.pcap
+
+# --- experiment output & data ---
+*.jsonl
+*.archive
+!cli/examples/**/*.json
+
+# --- backups (mongodumps live in these) ---
+nwdaf-backups/
+*.pre-*
+*.bak
+*.orig
+archives/
+
+# --- ML models (Track 1 is not part of this repo) ---
+*.pkl
+*.hdf5
+
+# --- local environment ---
+# Root-only. The per-service nwdaf/*/.env files are real configuration
+# (Mongo URI, routes, bind address), contain no secrets, are tracked
+# upstream, and ARE committed - do not broaden this to bare `.env`.
+/.env
+/tmp/oai/
+policies/nrf-live/
+
+# --- editor ---
+.vscode/
+.idea/
+*.swp
+docs/PROJECT-HISTORY.md

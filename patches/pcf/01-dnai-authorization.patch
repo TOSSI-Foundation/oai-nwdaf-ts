@@ -1,0 +1,151 @@
+# PCF: authorize multiple DNAIs per session (Npcf_PolicyAuthorization)
+#
+# Upstream : https://gitlab.eurecom.fr/oai/cn5g/oai-cn5g-pcf.git
+# Base     : 67aee53df01542a0deccf32874bfb90b38c547b3
+# Apply    : git checkout 67aee53df01542a0deccf32874bfb90b38c547b3 && git apply <this file>
+#
+# Lets an AF routing requirement install a TrafficControlData listing more than
+# one DNAI, so analytics have a set to select WITHIN. The PCF remains the
+# authorization authority; it does not choose.
+#
+diff --git a/src/pcf_app/pcf_policy_authorization.cpp b/src/pcf_app/pcf_policy_authorization.cpp
+index 673e43a..9dceb93 100644
+--- a/src/pcf_app/pcf_policy_authorization.cpp
++++ b/src/pcf_app/pcf_policy_authorization.cpp
+@@ -2,6 +2,12 @@
+  * SPDX-License-Identifier: LicenseRef-CSSL-1.0
+  */
+ 
++#include "TrafficControlData.h"
++#include "PccRule.h"
++#include "AfRoutingRequirement.h"
++#include "AfRoutingRequirementRm.h"
++#include "RouteToLocation.h"
++#include "SmPolicyDecision.h"
+ #include "pcf_policy_authorization.hpp"
+ #include "logger.hpp"
+ #include "pcf_config.hpp"
+@@ -24,10 +30,63 @@ using namespace oai::_3gpp::model;
+ 
+ using namespace std;
+ 
++// Highest priority, so an AF routing request wins over provisioned rules.
++static constexpr int32_t AF_ROUTING_RULE_PRECEDENCE = 1;
++
+ //------------------------------------------------------------------------------
+ pcf_policy_authorization::pcf_policy_authorization(pcf_event& ev)
+     : m_event_sub(ev) {}
+ 
++//------------------------------------------------------------------------------
++// Route 2: translate an AF routing requirement (TS 23.503 "AF influence on
++// traffic routing", TS 29.514 AppSessionContextReqData.afRoutReq) into the
++// SmPolicyDecision fields the SMF consumes.
++//
++// Previously request_decision was declared and never populated, so the AF path
++// merged an empty decision and the resulting UpdateNotify carried the unchanged
++// policy. This builds a TrafficControlData holding the AF's routeToLocs and a
++// PCC rule referencing it, so a steering change made by an AF actually reaches
++// the SMF.
++// Takes the routeToLocs vector rather than the requirement object: the create
++// path yields AfRoutingRequirement while the update path yields
++// AfRoutingRequirementRm (distinct generated types), but both expose
++// getRouteToLocs()/routeToLocsIsSet() with the same element type.
++static void af_routing_to_decision(
++    const std::vector<oai::_3gpp::model::RouteToLocation>& route_to_locs,
++    const std::string& tc_id, const std::string& rule_id,
++    oai::_3gpp::model::SmPolicyDecision& request_decision) {
++  if (route_to_locs.empty()) {
++    return;
++  }
++
++  oai::_3gpp::model::TrafficControlData tc_data = {};
++  tc_data.setTcId(tc_id);
++  tc_data.setRouteToLocs(route_to_locs);
++
++  std::map<std::string, oai::_3gpp::model::TrafficControlData> tcs = {};
++  tcs.insert(std::make_pair(tc_id, tc_data));
++  request_decision.setTraffContDecs(tcs);
++
++  oai::_3gpp::model::PccRule rule = {};
++  rule.setPccRuleId(rule_id);
++  rule.setRefTcData(std::vector<std::string>{tc_id});
++  // TS 29.512: lower precedence value = higher priority. An explicit AF
++  // routing requirement must override any pre-provisioned steering rule,
++  // otherwise validate_and_merge_decision() assigns highest+1 and the stale
++  // rule keeps winning at the SMF.
++  rule.setPrecedence(AF_ROUTING_RULE_PRECEDENCE);
++
++  std::map<std::string, oai::_3gpp::model::PccRule> rules = {};
++  rules.insert(std::make_pair(rule_id, rule));
++  request_decision.setPccRules(rules);
++
++  std::string dnais = {};
++  for (const auto& r : route_to_locs) dnais += r.getDnai() + " ";
++  Logger::pcf_app().info(
++      "AF routing requirement -> TrafficControlData '%s' (DNAIs: %s)",
++      tc_id.c_str(), dnais.c_str());
++}
++
+ //------------------------------------------------------------------------------
+ status_code pcf_policy_authorization::post_app_sessions_handler(
+     const oai::_3gpp::model::AppSessionContext& context,
+@@ -76,6 +135,15 @@ status_code pcf_policy_authorization::post_app_sessions_handler(
+   // Validate the request decision against the current decision
+   // merge the request decision with the current decision if the request
+   // decision is valid
++  // Route 2: populate request_decision from the AF's routing requirement.
++  if (reqContext.afRoutReqIsSet() &&
++      reqContext.getAfRoutReq().routeToLocsIsSet()) {
++    af_routing_to_decision(
++        reqContext.getAfRoutReq().getRouteToLocs(),
++        "af-tc-" + association_id.value_or("0"),
++        "af-rule-" + association_id.value_or("0"), request_decision);
++  }
++
+   handler_result decision_result =
+       validate_and_merge_decision(request_decision, current_decision);
+   if (decision_result.problem_details.has_value()) {
+@@ -145,6 +213,15 @@ policy_auth::status_code pcf_policy_authorization::mod_app_session_handler(
+   // Validate the request decision against the current decision
+   // merge the request decision with the current decision if the request
+   // decision is valid
++  // Route 2: populate request_decision from the AF's routing requirement.
++  if (reqContext.afRoutReqIsSet() &&
++      reqContext.getAfRoutReq().routeToLocsIsSet()) {
++    af_routing_to_decision(
++        reqContext.getAfRoutReq().getRouteToLocs(),
++        "af-tc-" + association_id.value_or("0"),
++        "af-rule-" + association_id.value_or("0"), request_decision);
++  }
++
+   handler_result decision_result =
+       validate_and_merge_decision(request_decision, current_decision, true);
+ 
+diff --git a/src/pcf_app/policy_auth/app_session.cpp b/src/pcf_app/policy_auth/app_session.cpp
+index ad3119b..ba522a0 100644
+--- a/src/pcf_app/policy_auth/app_session.cpp
++++ b/src/pcf_app/policy_auth/app_session.cpp
+@@ -111,9 +111,22 @@ handler_result validate_and_merge_decision(
+   current_decision.setPccRules(pccRulesMap);
+ 
+   // Merge Traffic Control Data
++  //
++  // Route 2: std::map::insert() is a no-op when the key already exists, so a
++  // steering update that re-targets an EXISTING TrafficControlData id (which is
++  // exactly what re-steering an established session does) was silently
++  // discarded. Assign so an existing tcId is genuinely replaced.
+   auto trafficControlMap = current_decision.getTraffContDecs();
+   for (auto& [key, value] : request_decision.getTraffContDecs()) {
+-    trafficControlMap.insert(std::make_pair(key, value));
++    auto existing = trafficControlMap.find(key);
++    if (existing != trafficControlMap.end()) {
++      Logger::pcf_app().info(
++          "Replacing TrafficControlData '%s' in the current decision",
++          key.c_str());
++      existing->second = value;
++    } else {
++      trafficControlMap.insert(std::make_pair(key, value));
++    }
+   }
+ 
+   try {

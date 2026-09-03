@@ -1,0 +1,22 @@
+steering-rule-primary:
+  flowInfos:
+    - flowDescription: permit out ip from any to assigned
+  precedence: 10
+  refTcData:
+    - steering-scenario-primary
+
+steering-rule-secondary:
+  flowInfos:
+    - flowDescription: permit out ip from any to assigned
+  precedence: 10
+  refTcData:
+    - steering-scenario-secondary
+
+# Provisioned steering rule authorizing both N6 DNAIs. Precedence stays 10 so an
+# AF-installed rule (precedence 1) still out-ranks it, preserving Route 2.
+steering-rule-both:
+  flowInfos:
+    - flowDescription: permit out ip from any to assigned
+  precedence: 10
+  refTcData:
+    - steering-scenario-both

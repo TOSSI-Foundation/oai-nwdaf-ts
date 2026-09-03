@@ -1,0 +1,1711 @@
+# SMF: NWDAF DN_PERFORMANCE consumer + DNAI steering actuation
+#
+# Upstream : https://gitlab.eurecom.fr/oai/cn5g/oai-cn5g-smf.git
+# Base     : 667aa8fd356d2fd569bf8aa1c610065e7be18f65
+# Apply    : git checkout 667aa8fd356d2fd569bf8aa1c610065e7be18f65 && git apply <this file>
+#
+# Adds the NWDAF analytics consumer, per-session PCF-authorized DNAI selection,
+# SMF-initiated UP path change, and the PFCP FAR+PDR re-bind that moves a live
+# session between N6 network instances.
+# NOTE: also copy smf_nwdaf_consumer.{cpp,hpp} from files/ - they are NEW files
+# and are not part of this diff.
+#
+diff --git a/src/api-server/smf-http2-server.cpp b/src/api-server/smf-http2-server.cpp
+index 20f123d..e11395a 100644
+--- a/src/api-server/smf-http2-server.cpp
++++ b/src/api-server/smf-http2-server.cpp
+@@ -397,8 +397,12 @@ void smf_http2_server::start() {
+       });
+ 
+   // SMF Callback (including SM Policy Notification)
++  // nghttp2 treats a pattern WITHOUT a trailing '/' as an exact match, so the
++  // deeper callback URI the SMF itself advertises
++  // (/nsmf-callback/v1/{scid}/sm-policy-control-notify/update) never matched
++  // and returned 404. A trailing '/' makes it a prefix match.
+   server.handle(
+-      smf_sbi_helper::SmfCallbackBase(),
++      smf_sbi_helper::SmfCallbackBase() + "/",
+       [&](const request& request, const response& response) {
+         request.on_data([&](const uint8_t* data, std::size_t len) {
+           if (len > 0) {
+diff --git a/src/common/msg/itti_msg_sbi.hpp b/src/common/msg/itti_msg_sbi.hpp
+index 4644bb5..ef3f941 100644
+--- a/src/common/msg/itti_msg_sbi.hpp
++++ b/src/common/msg/itti_msg_sbi.hpp
+@@ -126,7 +126,8 @@ class itti_sbi_update_sm_context_request : public itti_sbi_msg {
+         pid(i.pid),
+         scid(i.scid),
+         http_version(i.http_version),
+-        session_procedure_type(i.session_procedure_type) {}
++        session_procedure_type(i.session_procedure_type),
++        steering_dnai(i.steering_dnai) {}
+ 
+   const char* get_msg_name() {
+     return "N11_SESSION_UPDATE_SM_CONTEXT_REQUEST";
+@@ -136,6 +137,22 @@ class itti_sbi_update_sm_context_request : public itti_sbi_msg {
+   std::string scid;  // SM Context ID
+   uint8_t http_version;
+   session_management_procedures_type_e session_procedure_type;
++
++  // The DNAI an SMF-INITIATED traffic-steering reconfiguration should apply,
++  // used ONLY with session_procedure_type ==
++  // PDU_SESSION_MODIFICATION_SMF_REQUESTED. EMPTY on every other path, so no
++  // existing flow can be affected by its presence.
++  //
++  // WHY A FIELD AND NOT A SYNTHESISED SmPolicyDecision: the PCF-initiated
++  // branch reads its DNAI out of a real decision the PCF sent. Fabricating a
++  // decision so the self-initiated path could reuse that branch would put an
++  // invented policy object into the SMF's own policy handling. The DNAI is
++  // carried explicitly instead. Absent, never faked.
++  //
++  // NOTE: this header is in src/common/, which is SMF-LOCAL - only
++  // src/common-src is the shared submodule (see .gitmodules) - so this field
++  // costs no rebuild of the PCF/AMF/NRF.
++  std::string steering_dnai;
+ };
+ 
+ //-----------------------------------------------------------------------------
+diff --git a/src/common/smf.h b/src/common/smf.h
+index e97463d..4d15a20 100644
+--- a/src/common/smf.h
++++ b/src/common/smf.h
+@@ -65,6 +65,16 @@ static const std::vector<std::string> session_management_procedures_type_e2str =
+      "N2_HO_PREPARATION_PHASE_STEP1",
+      "N2_HO_PREPARATION_PHASE_STEP2",
+      "N2_HO_EXECUTION_PHASE",
++     // Route 2: this table is indexed by session_management_procedures_type_e,
++     // so it must stay index-aligned with the enum above. Entries 20-22 were
++     // missing and "PDU_SESSION_TEST" sat at index 20 (N2_HO_CANCELLATION_PHASE),
++     // so .at(21) for PDU_SESSION_MODIFICATION_PCF_INITIATED threw
++     // std::out_of_range ("__n (which is 21) >= this->size() (which is 21)")
++     // at every site that logs the procedure type - which aborted the
++     // PCF-initiated modification before it could reach the UPF.
++     "N2_HO_CANCELLATION_PHASE",
++     "PDU_SESSION_MODIFICATION_PCF_INITIATED",
++     "PDU_SESSION_RELEASE_PCF_INITIATED",
+      "PDU_SESSION_TEST"
+ 
+ };
+diff --git a/src/oai_smf/main.cpp b/src/oai_smf/main.cpp
+index 3b6f2eb..8bf19a4 100644
+--- a/src/oai_smf/main.cpp
++++ b/src/oai_smf/main.cpp
+@@ -20,6 +20,7 @@
+ #include "options.hpp"
+ #include "pid_file.hpp"
+ #include "smf_app.hpp"
++#include "smf_nwdaf_consumer.hpp"
+ #include "smf_config.hpp"
+ #include "smf-api-server.h"
+ #include "pistache/endpoint.h"
+@@ -186,6 +187,12 @@ int main(int argc, char** argv) {
+   smf_app_inst = new smf_app(Options::getlibconfigConfig());
+   smf_app_inst->start();
+ 
++  // TS 23.288 clause 6.4.4 / 6.14 name the SMF as the NF that (re)selects the
++  // UP path (UPF and DNAI) from NWDAF analytics. Start the NWDAF analytics
++  // consumer; it is a no-op unless SMF_NWDAF_ENABLE is set, and it discovers
++  // the NWDAF through the NRF per clause 5.2.
++  oai::smf::smf_nwdaf_consumer::get_instance().start();
++
+   // PID file
+   // Currently hard-coded value. TODO: add as config option.
+   std::string pid_file_name =
+diff --git a/src/smf_app/CMakeLists.txt b/src/smf_app/CMakeLists.txt
+index a6cf889..b28dc1b 100644
+--- a/src/smf_app/CMakeLists.txt
++++ b/src/smf_app/CMakeLists.txt
+@@ -40,6 +40,7 @@ add_library (SMF STATIC
+   smf_n4.cpp
+   smf_n7.cpp
+   smf_sbi.cpp
++  smf_nwdaf_consumer.cpp
+   smf_event.cpp
+   smf_profile.cpp
+   smf_subscription.cpp
+diff --git a/src/smf_app/smf_app.cpp b/src/smf_app/smf_app.cpp
+index 74eebec..71f0cad 100644
+--- a/src/smf_app/smf_app.cpp
++++ b/src/smf_app/smf_app.cpp
+@@ -172,6 +172,16 @@ void smf_app::delete_smf_context(std::shared_ptr<smf_context> spc) {
+   supi2smf_context.erase(spc.get()->get_supi());
+ }
+ 
++//------------------------------------------------------------------------------
++void smf_app::get_smf_contexts(
++    std::vector<std::shared_ptr<smf_context>>& contexts) const {
++  std::shared_lock lock(m_supi2smf_context);
++  contexts.reserve(supi2smf_context.size());
++  for (const auto& it : supi2smf_context) {
++    if (it.second) contexts.push_back(it.second);
++  }
++}
++
+ //------------------------------------------------------------------------------
+ void smf_app::restore_n4_sessions(const seid_t& seid) const {
+   std::shared_lock lock(m_seid2smf_context);
+@@ -239,6 +249,26 @@ void smf_app_task(void*) {
+         }
+         break;
+ 
++      // SMF-INITIATED traffic-steering reconfiguration (NWDAF analytics).
++      //
++      // WHY THIS CASE HAD TO BE ADDED: every OTHER producer of an Update SM
++      // Context Request is an HTTP handler thread, and those call
++      // smf_app::handle_pdu_session_update_sm_context_request() DIRECTLY - the
++      // AMF path from smf-api-server, the PCF path from
++      // smf_http2_server::modify_sm_context_handler(). So the REQUEST variant
++      // was never dispatched here; only the RESPONSE variants were.
++      //
++      // smf_nwdaf_consumer runs on its own detached thread and must NOT call
++      // the handler directly: that would make it a second writer to
++      // smf_context's procedure state alongside TASK_SMF_APP. It posts this
++      // message instead, and this case is what runs the handler on the correct
++      // task. Without it the message is received and silently dropped.
++      case N11_SESSION_UPDATE_SM_CONTEXT_REQUEST:
++        smf_app_inst->handle_pdu_session_update_sm_context_request(
++            std::static_pointer_cast<itti_sbi_update_sm_context_request>(
++                shared_msg));
++        break;
++
+       case N11_SESSION_UPDATE_SM_CONTEXT_RESPONSE:
+         if (itti_sbi_update_sm_context_response* m =
+                 dynamic_cast<itti_sbi_update_sm_context_response*>(msg)) {
+diff --git a/src/smf_app/smf_app.hpp b/src/smf_app/smf_app.hpp
+index 137fa46..99a53a0 100644
+--- a/src/smf_app/smf_app.hpp
++++ b/src/smf_app/smf_app.hpp
+@@ -227,6 +227,17 @@ class smf_app {
+    */
+   void delete_smf_context(std::shared_ptr<smf_context> spc);
+ 
++  /*
++   * Get a snapshot of all active SMF contexts.
++   * Added so the NWDAF consumer can resolve its analytics-driven preference
++   * against EACH session's own PCF authorization - the authorized DNAI set is
++   * a property of the session, not of the SMF.
++   * @param [std::vector<std::shared_ptr<smf_context>>&] contexts: output
++   * @return void
++   */
++  void get_smf_contexts(
++      std::vector<std::shared_ptr<smf_context>>& contexts) const;
++
+   /*
+    * static_paa_get_free_paa
+    * @param [const std::string &] dnn
+diff --git a/src/smf_app/smf_context.cpp b/src/smf_app/smf_context.cpp
+index eace696..0ae24a1 100644
+--- a/src/smf_app/smf_context.cpp
++++ b/src/smf_app/smf_context.cpp
+@@ -37,7 +37,10 @@
+ #include "logger.hpp"
+ #include "smf_sbi_helper.hpp"
+ #include "smf_3gpp_conversions.hpp"
++#include <set>
++
+ #include "smf_app.hpp"
++#include "smf_nwdaf_consumer.hpp"
+ #include "smf_config.hpp"
+ #include "smf_event.hpp"
+ #include "smf_n1.hpp"
+@@ -2599,15 +2602,338 @@ bool smf_context::handle_pdu_session_update_sm_context_request(
+     }
+   }
+ 
++  // SMF-INITIATED traffic-steering reconfiguration.
++  //
++  // WHAT THIS IS: the SMF acting on its OWN NWDAF-derived UP path decision,
++  // with no AF and no PCF notification involved. TS 23.288 clause 6.14.4:
++  // "If the analytics consumer is an SMF, the SMF may use the analytics to
++  // determine the UPF and DNAI that offers the best user plane performance."
++  //
++  // WHAT THIS IS NOT - READ BEFORE DESCRIBING IT:
++  //  * NOT TS 23.502 clause 4.3.3.2 (UE or network requested PDU Session
++  //    Modification). No N1/N2 is sent, because nothing the UE or gNB can
++  //    observe changes: same PDU session, same UE IP, same QoS flows, same
++  //    TEIDs. Only the N6 network instance behind the FAR/PDR moves.
++  //  * NOT TS 23.502 clause 4.3.5 either - every subclause there is a PSA
++  //    change, branching point, UL CL or Ethernet PSA relocation. This is none
++  //    of those.
++  //  * The actuation follows the sentence in TS 23.288 clause 6.4.4 ("the SMF
++  //    may (re)configure traffic steering, updating the UPF regarding the
++  //    target DNAI with new traffic steering rules"), which is written for
++  //    Service Experience analytics. Applying it to a DN_PERFORMANCE-derived
++  //    decision is a REASONABLE READING, not a literal clause-6.14 mechanism.
++  // Call it an SMF-initiated traffic-steering reconfiguration, never
++  // "3GPP-compliant SMF-initiated PDU session modification".
++  //
++  // PDU_SESSION_MODIFICATION_SMF_REQUESTED is an OAI-internal enum from
++  // smf.h - already handled by session_update_sm_context_procedure on both the
++  // N4 request and N4 response paths - not a 3GPP procedure name.
++  //
++  // See docs/smf-self-trigger-design.md.
++  if (smreq->session_procedure_type ==
++      session_management_procedures_type_e::
++          PDU_SESSION_MODIFICATION_SMF_REQUESTED) {
++    pdu_session_release_procedure = false;
++    update_upf                    = false;
++    // Same reason as the PCF branch below: procedure_type still holds its
++    // initialiser here, and it is what is handed to
++    // session_update_sm_context_procedure.
++    procedure_type = session_management_procedures_type_e::
++        PDU_SESSION_MODIFICATION_SMF_REQUESTED;
++
++    const std::string requested_dnai = smreq->steering_dnai;
++    std::string self_source_dnai     = {};
++    std::string self_target_dnai     = {};
++
++    if (requested_dnai.empty()) {
++      Logger::smf_app().warn(
++          "SMF-initiated steering: no DNAI carried in the request, nothing to "
++          "do");
++    } else if (!sp || !sp->get_session_handler() ||
++               !sp->get_session_handler()->get_session_graph()) {
++      Logger::smf_app().warn(
++          "SMF-initiated steering: no session graph for this PDU session");
++    } else if (!sp->policy_ptr) {
++      // No PCF policy association at all: the SMF has no authority of its own.
++      Logger::smf_app().warn(
++          "SMF-initiated steering: this PDU session has no PCF policy "
++          "association - refusing to steer to '%s'",
++          requested_dnai.c_str());
++    } else {
++      // THE GATE, ENFORCED A SECOND TIME AND ON PURPOSE.
++      //
++      // smf_nwdaf_consumer already checked this DNAI against the authorized set
++      // before sending the request. That check ran on the consumer's own thread
++      // at decision time; THIS one runs on TASK_SMF_APP at execution time,
++      // against the policy as it stands NOW. Between the two the PCF may have
++      // revoked or narrowed the authorization - PROJECT-HISTORY §14.3, "never
++      // use revoked authorization". This is the check that counts.
++      const auto by_precedence = get_authorized_dnais(sp->policy_ptr->decision);
++      if (by_precedence.empty()) {
++        Logger::smf_app().warn(
++            "SMF-initiated steering: the PCF decision for this session "
++            "authorizes no DNAI - refusing to steer to '%s'",
++            requested_dnai.c_str());
++      } else {
++        // Lower precedence value wins (TS 29.512), so begin() is the governing
++        // rule. Analytics may select WITHIN it, never across it.
++        const uint32_t best_precedence       = by_precedence.begin()->first;
++        const std::set<std::string>& allowed = by_precedence.begin()->second;
++
++        if (allowed.find(requested_dnai) == allowed.end()) {
++          std::string list;
++          for (const auto& d : allowed) {
++            if (!list.empty()) list += ", ";
++            list += d;
++          }
++          Logger::smf_app().warn(
++              "SMF-initiated steering: DNAI '%s' is NOT authorized by the PCF "
++              "for this session (authorized at precedence %u: %s) - REFUSING. "
++              "The PCF is the policy authority (TS 23.503).",
++              requested_dnai.c_str(), best_precedence, list.c_str());
++        } else {
++          std::shared_ptr<upf_graph> graph =
++              sp->get_session_handler()->get_session_graph();
++          self_source_dnai = graph->get_n6_dnai();
++          if (graph->apply_steering_dnai(requested_dnai)) {
++            update_upf       = true;
++            self_target_dnai = graph->get_n6_dnai();
++            Logger::smf_app().info(
++                "SMF-initiated steering: applied NWDAF-selected DNAI '%s' "
++                "(PCF-authorized at precedence %u); N4 update follows",
++                requested_dnai.c_str(), best_precedence);
++          } else {
++            Logger::smf_app().info(
++                "SMF-initiated steering: DNAI '%s' did not change the network "
++                "instance of this session, no N4 update needed",
++                requested_dnai.c_str());
++          }
++        }
++      }
++    }
++
++    // UP_PATH_CH is reported from the N4 response handler once the UPF has
++    // ACKNOWLEDGED the change - see the note on the PCF-initiated branch.
++    (void) self_source_dnai;
++    (void) self_target_dnai;
++  }
++
+   // For PCF-initiated SM Policy Association Modification
+   if (smreq->session_procedure_type ==
+       session_management_procedures_type_e::
+           PDU_SESSION_MODIFICATION_PCF_INITIATED) {
+-    // Process the request -> update UPF if necesssary
+-    // TODO:
+-    // example:
+     pdu_session_release_procedure = false;
+     update_upf                    = false;
++    // Route 2: procedure_type still holds its initialiser
++    // (PDU_SESSION_ESTABLISHMENT_UE_REQUESTED) at this point - only the
++    // AMF-driven branches above assign it. It is what is handed to
++    // session_update_sm_context_procedure below, so without this the steering
++    // update ran the establishment branch of the procedure and was rejected.
++    procedure_type = session_management_procedures_type_e::
++        PDU_SESSION_MODIFICATION_PCF_INITIATED;
++
++    // Route 2: apply a PCF-initiated traffic-steering change to a session that
++    // is already established, without re-running UPF selection and without
++    // requiring the UE to re-attach.
++    //
++    // The SmPolicyNotification body was stored verbatim as JSON by
++    // smf_http2_server::modify_sm_context_handler().
++    // TS 29.512: SmPolicyDecision.traffContDecs[].routeToLocs[].dnai carries
++    // the target DNAI. A decision normally lists both the access-side DNAI and
++    // the N6-side DNAI; apply_steering_dnai() accepts only DNAIs that resolve
++    // to an instance the UPF advertises on an N6 interface, so every candidate
++    // can simply be offered to it in turn.
++    // TS 29.508 UP_PATH_CH reporting: the DNAI the session's N6 path was on
++    // before this decision, and the one it ends up on. Captured here and used
++    // once, after the steering below has completed, so that nothing in the
++    // proven Route 2 flow depends on them.
++    std::string steer_source_dnai = {};
++    std::string steer_target_dnai = {};
++
++    nlohmann::json json_data = {};
++    smreq->req.get_json_data(json_data);
++
++    // TS 29.512: a PCC rule references its TrafficControlData via refTcData,
++    // and precedence orders the rules (LOWER value = HIGHER priority).
++    // A decision may carry several traffic-control entries (e.g. the original
++    // steering rule plus a newly merged AF rule), so the DNAIs must be applied
++    // in precedence order and the winner applied last - otherwise map
++    // iteration order decides, and a stale rule can overwrite the new one.
++    std::vector<std::pair<uint32_t, std::string>> ranked_dnais = {};
++    try {
++      if (json_data.find("smPolicyDecision") != json_data.end()) {
++        const auto& decision = json_data["smPolicyDecision"];
++
++        // 🐛 FIX (2026-08-26): keep the SESSION'S STORED POLICY CURRENT.
++        //
++        // policy_association::decision is written when the association is
++        // created, and on an SMF-INITIATED update or GET (smf_n7.cpp) - and
++        // NOWHERE ELSE. A PCF-pushed SmPolicyNotification was parsed here, out
++        // of the raw JSON, and the stored decision was left untouched. So
++        // sp->policy_ptr->decision was a stale ESTABLISHMENT-TIME snapshot that
++        // never saw an AF-installed PCC rule.
++        //
++        // Everything that reads it was therefore reasoning about old policy:
++        //   * smf_procedure.cpp select_upf_nodes() during UPF (re)selection,
++        //   * smf_nwdaf_consumer::evaluate_sessions() - which is where the
++        //     analytics authorization set comes from,
++        //   * the SMF-initiated steering branch above.
++        // Caught by route2_af_test.sh: with SMF_NWDAF_ACT=1 the SMF UNDID an
++        // AF-requested steer 852 ms after applying it, justifying itself with
++        // the precedence-10 provisioned rule because the precedence-1 AF rule
++        // was absent from the snapshot it read. That is a policy-authority
++        // violation, and the gate that was supposed to prevent it was being fed
++        // stale data.
++        //
++        // CLASSIFICATION: OAI implementation gap (pre-existing). It was latent
++        // while the analytics decision was only LOGGED; making it actuate is
++        // what turned it into a live defect.
++        //
++        // Overwriting rather than merging matches what this codebase already
++        // does on the SMF-initiated update path - see the TODO in
++        // smf_n7.cpp::update_sm_policy_association(), which notes that the
++        // standard expects a delta but that the OAI PCF sends a full decision.
++        if (sp && sp->policy_ptr) {
++          try {
++            oai::_3gpp::model::SmPolicyDecision fresh = {};
++            from_json(decision, fresh);
++            sp->policy_ptr->decision = fresh;
++            Logger::smf_app().debug(
++                "PCF-initiated modification: refreshed the session's stored "
++                "SmPolicyDecision from the notification");
++          } catch (const std::exception& e) {
++            Logger::smf_app().warn(
++                "PCF-initiated modification: could not refresh the stored "
++                "SmPolicyDecision (%s) - authorization checks will use the "
++                "previous one",
++                e.what());
++          }
++        }
++
++        std::map<std::string, uint32_t> tc_precedence = {};
++        if (decision.find("pccRules") != decision.end()) {
++          for (const auto& rule : decision["pccRules"].items()) {
++            uint32_t prec = 0xFFFFFFFF;
++            if (rule.value().find("precedence") != rule.value().end())
++              prec = rule.value()["precedence"].get<uint32_t>();
++            if (rule.value().find("refTcData") == rule.value().end()) continue;
++            for (const auto& tc_id : rule.value()["refTcData"]) {
++              const std::string id = tc_id.get<std::string>();
++              auto it              = tc_precedence.find(id);
++              if (it == tc_precedence.end() || prec < it->second)
++                tc_precedence[id] = prec;
++            }
++          }
++        }
++        if (decision.find("traffContDecs") != decision.end()) {
++          for (const auto& tc : decision["traffContDecs"].items()) {
++            if (tc.value().find("routeToLocs") == tc.value().end()) continue;
++            uint32_t prec = 0xFFFFFFFF;
++            auto it       = tc_precedence.find(tc.key());
++            if (it != tc_precedence.end()) prec = it->second;
++            for (const auto& route : tc.value()["routeToLocs"]) {
++              if (route.find("dnai") == route.end()) continue;
++              ranked_dnais.emplace_back(prec, route["dnai"].get<std::string>());
++            }
++          }
++        }
++        // apply worst-priority first so the highest-priority rule wins
++        std::stable_sort(
++            ranked_dnais.begin(), ranked_dnais.end(),
++            [](const auto& a, const auto& b) { return a.first > b.first; });
++      }
++    } catch (const std::exception& e) {
++      Logger::smf_app().warn(
++          "PCF-initiated modification: could not parse SmPolicyDecision (%s)",
++          e.what());
++    }
++
++    std::vector<std::string> candidate_dnais = {};
++    for (const auto& rd : ranked_dnais) candidate_dnais.push_back(rd.second);
++
++    // NWDAF analytics may choose WITHIN the winning PCC rule, never across it.
++    //
++    // ranked_dnais is sorted worst-precedence-first, so the governing rule is
++    // the one with the LOWEST precedence value (TS 29.512) - i.e. the entries
++    // at ranked_dnais.back()'s precedence. Restricting the analytics choice to
++    // that group is what keeps PCF policy authority intact: an AF-installed
++    // rule at precedence 1 still beats an analytics preference expressed
++    // against the provisioned rule at precedence 10.
++    //
++    // TS 23.288 clause 6.4.4: "The consumer SMF determines to (re)selects UP
++    // paths, including UPF and DNAI" - but only among the DNAIs the PCF
++    // authorized (TS 23.503: "The PCF provides DNAI(s) in the PCC rule(s) to
++    // the SMF").
++    if (!ranked_dnais.empty()) {
++      const uint32_t best_precedence = ranked_dnais.back().first;
++      std::set<std::string> best_group = {};
++      for (const auto& rd : ranked_dnais) {
++        if (rd.first == best_precedence) best_group.insert(rd.second);
++      }
++      std::string reason = {};
++      const std::string nwdaf_choice =
++          oai::smf::smf_nwdaf_consumer::get_instance().choose_authorized_dnai(
++              best_group, reason);
++      if (!nwdaf_choice.empty()) {
++        // Apply the analytics choice LAST so it wins over the other candidates
++        // of the same rule, without disturbing the precedence ordering that
++        // the lower-priority rules already established.
++        candidate_dnais.push_back(nwdaf_choice);
++        Logger::smf_app().info(
++            "PCF-initiated modification: NWDAF analytics selected DNAI '%s' "
++            "within the PCF-authorized set of precedence %u (%s)",
++            nwdaf_choice.c_str(), best_precedence, reason.c_str());
++      } else {
++        Logger::smf_app().info(
++            "PCF-initiated modification: NWDAF analytics did not change the "
++            "selection (%s); applying the PCF decision as ranked",
++            reason.c_str());
++      }
++    }
++
++    if (candidate_dnais.empty()) {
++      Logger::smf_app().warn(
++          "PCF-initiated modification: no routeToLocs DNAI in the decision, "
++          "nothing to steer");
++    } else if (!sp || !sp->get_session_handler() ||
++               !sp->get_session_handler()->get_session_graph()) {
++      Logger::smf_app().warn(
++          "PCF-initiated modification: no session graph for this PDU session");
++    } else {
++      std::shared_ptr<upf_graph> graph =
++          sp->get_session_handler()->get_session_graph();
++      // Read the DNAI the N6 edge is bound to BEFORE any steer is applied, so
++      // the UP_PATH_CH notification can report where the session came from.
++      // Read-only; apply_steering_dnai() is what writes it.
++      steer_source_dnai = graph->get_n6_dnai();
++      for (const auto& dnai : candidate_dnais) {
++        if (graph->apply_steering_dnai(dnai)) {
++          // At least one N6 edge was re-bound: the UPF must be told.
++          update_upf = true;
++        }
++      }
++      if (!update_upf) {
++        Logger::smf_app().info(
++            "PCF-initiated modification: decision did not change the network "
++            "instance of this session, no N4 update needed");
++      }
++      // Additive: only reads back what the loop above already decided.
++      if (update_upf) {
++        steer_target_dnai = graph->get_n6_dnai();
++      }
++    }
++
++    // NOTE: UP_PATH_CH is NOT emitted here any more.
++    //
++    // It used to fire at this point - when the SMF committed the change to the
++    // session graph, BEFORE the N4 update was even sent - which meant the NWDAF
++    // was told about a path change the UPF might reject. PROJECT-HISTORY 18.2
++    // recorded that as an honest limitation. It is now emitted from the N4
++    // Session Modification RESPONSE handler in smf_procedure.cpp, once the UPF
++    // has acknowledged the change, alongside confirm_n6_state().
++    // steer_source_dnai / steer_target_dnai are kept for the log line above.
++    (void) steer_source_dnai;
++    (void) steer_target_dnai;
+   }
+ 
+   // Step 5. Create a procedure for update SM context and let the procedure
+@@ -3840,6 +4166,117 @@ void smf_context::trigger_ue_ip_change(
+   event_sub.ee_ue_ip_change(scid, http_version);
+ }
+ 
++//------------------------------------------------------------------------------
++// UP Path Change (TS 29.508 SmfEvent = UP_PATH_CH).
++//
++// Modelled on handle_ue_ip_change() above; the only differences are the event
++// enum and the two DNAI fields.
++//
++// WHY: TS 23.288 clause 6.14.2 routes DN Performance analytics' SMF-side input
++// through Table 6.4.2-2, which lists DNAI and UPF info as SMF-sourced. Without
++// this notification an NWDAF cannot know which DNAI a PDU session's traffic is
++// flowing over, so it cannot attribute a usage report to a DNAI, and
++// DN_PERFORMANCE - whose whole output is per-DNAI (Table 6.14.3-1) - is not
++// computable.
++//
++// The SMF could already PARSE an UP_PATH_CH subscription
++// (smf_3gpp_conversions.cpp) but never notified one.
++// CLASSIFICATION: OAI implementation gap.
++//
++// NOT emitted, deliberately:
++//  - upfInfo:      process_upf_profile() keeps only host and UpfInfo and
++//                  discards getNfInstanceId(), so this SMF does not hold the
++//                  UPF's NF Instance ID. The NWDAF resolves it from the NRF.
++//  - dnaiChgType:  EARLY / LATE / EARLY_LATE (TS 23.502 clause 4.3.6.3). This
++//                  SMF has no early-notification path, so reporting a change
++//                  type would be inventing one.
++//  - sourceTraRouting / targetTraRouting: the SMF does not model a
++//                  RouteToLocation for the session.
++// Absent, never faked.
++void smf_context::handle_up_path_change(
++    const scid_t& scid, const std::string& source_dnai,
++    const std::string& target_dnai, const uint8_t& http_version) const {
++  // A notification with no target DNAI carries no information: the whole point
++  // of the event is to say which DNAI the session is now on.
++  if (target_dnai.empty()) {
++    Logger::smf_app().debug(
++        "UP Path Change (Event Exposure): no target DNAI for "
++        "SMF Context ID " SCID_FMT ", nothing to notify",
++        scid);
++    return;
++  }
++
++  std::string supi                    = {};
++  std::shared_ptr<smf_pdu_session> sp = {};
++  if (!get_pdu_session_info(scid, supi, sp)) {
++    Logger::smf_app().debug(
++        "Could not retrieve info with "
++        "SMF Context ID " SCID_FMT " ",
++        scid);
++    return;
++  }
++
++  Logger::smf_app().debug(
++      "Send request to N11 to trigger UP Path Change (Event Exposure), "
++      "SUPI %s, PDU Session ID %u, source DNAI '%s', target DNAI '%s', "
++      "HTTP version %u",
++      supi.c_str(), sp->get_pdu_session_id(), source_dnai.c_str(),
++      target_dnai.c_str(), http_version);
++
++  std::vector<std::shared_ptr<smf_subscription>> subscriptions = {};
++  smf_app_inst->get_ee_subscriptions(
++      smf_event_t::SMF_EVENT_UP_PATH_CH, subscriptions);
++
++  if (subscriptions.size() > 0) {
++    Logger::smf_app().debug(
++        "Send ITTI msg to SMF N11 to trigger the event notification");
++    std::shared_ptr<itti_sbi_notify_subscribed_event> itti_msg =
++        std::make_shared<itti_sbi_notify_subscribed_event>(
++            TASK_SMF_APP, TASK_SMF_SBI);
++
++    for (auto i : subscriptions) {
++      event_notification ev_notif = {};
++      ev_notif.set_supi(supi);                                // SUPI
++      ev_notif.set_pdu_session_id(sp->get_pdu_session_id());  // PDU session ID
++      ev_notif.set_smf_event(smf_event_t::SMF_EVENT_UP_PATH_CH);
++      ev_notif.set_notif_uri(i.get()->notif_uri);
++      ev_notif.set_notif_id(i.get()->notif_id);
++      // timestamp
++      std::time_t time_epoch_ntp = std::time(nullptr);
++      uint64_t tv_ntp            = time_epoch_ntp + SECONDS_SINCE_FIRST_EPOCH;
++      ev_notif.set_timestamp(std::to_string(tv_ntp));
++
++      // TS 29.508: sourceDnai is conditional. It is genuinely absent for the
++      // first notification of a session, so it is left unset rather than sent
++      // as an empty string.
++      if (!source_dnai.empty()) {
++        ev_notif.set_source_dnai(source_dnai);
++      }
++      ev_notif.set_target_dnai(target_dnai);
++
++      itti_msg->event_notifs.push_back(ev_notif);
++    }
++
++    itti_msg->http_version = http_version;
++
++    int ret = itti_inst->send_msg(itti_msg);
++    if (RETURNok != ret) {
++      Logger::smf_app().error(
++          "Could not send ITTI message %s to task TASK_SMF_SBI",
++          itti_msg->get_msg_name());
++    }
++  } else {
++    Logger::smf_app().debug("No subscription available for this event");
++  }
++}
++
++//------------------------------------------------------------------------------
++void smf_context::trigger_up_path_change(
++    const scid_t& scid, const std::string& source_dnai,
++    const std::string& target_dnai, const uint8_t& http_version) const {
++  event_sub.ee_up_path_change(scid, source_dnai, target_dnai, http_version);
++}
++
+ //------------------------------------------------------------------------------
+ void smf_context::handle_qos_monitoring(
+     const seid_t& seid,
+@@ -4580,6 +5017,32 @@ void smf_context::send_pdu_session_update_response(
+         trigger_ddds(scid, 1);
+         trigger_pdusesest(scid, 1);
+         trigger_flexcn_event(scid, 1);
++
++        // TS 29.508 UP_PATH_CH: report the DNAI this session was established
++        // on. TS 23.288 Table 6.4.2-2 lists DNAI as SMF-sourced input to DN
++        // Performance analytics, so without this baseline the NWDAF cannot
++        // attribute a usage report to a DNAI until the session is first
++        // steered.
++        //
++        // sourceDnai is deliberately EMPTY here: there is no previous DNAI at
++        // establishment, and TS 29.508 makes sourceDnai conditional. It is
++        // omitted from the notification rather than sent as an empty string -
++        // absent, never faked.
++        //
++        // This point is reached after the N4 session establishment succeeded,
++        // so the DNAI read back is the one actually programmed into the UPF.
++        if (sps && sps->get_session_handler() &&
++            sps->get_session_handler()->get_session_graph()) {
++          const std::string established_dnai =
++              sps->get_session_handler()->get_session_graph()->get_n6_dnai();
++          if (!established_dnai.empty()) {
++            trigger_up_path_change(scid, {}, established_dnai, 1);
++          } else {
++            Logger::smf_app().debug(
++                "No DNAI recorded on the N6 edge of this session, no UP path "
++                "change to report");
++          }
++        }
+       } break;
+ 
+         // UE-Triggered Service Request Procedure (Step 1)
+diff --git a/src/smf_app/smf_context.hpp b/src/smf_app/smf_context.hpp
+index 7d08d9f..b4aa5d8 100644
+--- a/src/smf_app/smf_context.hpp
++++ b/src/smf_app/smf_context.hpp
+@@ -394,6 +394,10 @@ class smf_context : public std::enable_shared_from_this<smf_context> {
+     ee_ue_ip_change_connection = event_sub.subscribe_ee_ue_ip_change(
+         boost::bind(&smf_context::handle_ue_ip_change, this, _1, _2));
+ 
++    // Subscribe to UP Path Change Event (TS 29.508 UP_PATH_CH)
++    ee_up_path_change_connection = event_sub.subscribe_ee_up_path_change(
++        boost::bind(&smf_context::handle_up_path_change, this, _1, _2, _3, _4));
++
+     // Subscribe to PLMN Change Event
+     ee_plmn_change_connection = event_sub.subscribe_ee_plmn_change(
+         boost::bind(&smf_context::handle_plmn_change, this, _1, _2));
+@@ -426,6 +430,8 @@ class smf_context : public std::enable_shared_from_this<smf_context> {
+       ee_pdu_session_release_connection.disconnect();
+     if (ee_ue_ip_change_connection.connected())
+       ee_ue_ip_change_connection.disconnect();
++    if (ee_up_path_change_connection.connected())
++      ee_up_path_change_connection.disconnect();
+     if (ee_plmn_change_connection.connected())
+       ee_plmn_change_connection.disconnect();
+     if (ee_qos_monitoring_connection.connected())
+@@ -1002,6 +1008,30 @@ class smf_context : public std::enable_shared_from_this<smf_context> {
+   void handle_ue_ip_change(
+       const scid_t& scid, const uint8_t& http_version) const;
+ 
++  /*
++   * Trigger / handle a UP Path Change notification (TS 29.508 UP_PATH_CH).
++   *
++   * Reports which DNAI a PDU session's N6 path is bound to. TS 23.288 clause
++   * 6.14.2 routes DN Performance analytics' SMF-side input through Table
++   * 6.4.2-2, which lists DNAI and UPF info as SMF-sourced; without this an
++   * NWDAF cannot attribute a usage report to a DNAI and DN_PERFORMANCE - whose
++   * entire output is per-DNAI (Table 6.14.3-1) - is not computable.
++   *
++   * @param [scid_t] scid: SMF Context ID
++   * @param [std::string] source_dnai: the DNAI the session was on. EMPTY at
++   *        establishment, where there is no previous DNAI; TS 29.508 makes
++   *        sourceDnai conditional and an empty value is omitted on the wire.
++   * @param [std::string] target_dnai: the DNAI the session is now on
++   * @param [uint8_t] http_version: HTTP version
++   * @return void
++   */
++  void trigger_up_path_change(
++      const scid_t& scid, const std::string& source_dnai,
++      const std::string& target_dnai, const uint8_t& http_version) const;
++  void handle_up_path_change(
++      const scid_t& scid, const std::string& source_dnai,
++      const std::string& target_dnai, const uint8_t& http_version) const;
++
+   void trigger_plmn_change(
+       const scid_t& scid, const uint8_t& http_version) const;
+   void handle_plmn_change(
+@@ -1188,6 +1218,7 @@ class smf_context : public std::enable_shared_from_this<smf_context> {
+   bs2::connection sm_context_status_connection;
+   bs2::connection ee_pdu_session_release_connection;
+   bs2::connection ee_ue_ip_change_connection;
++  bs2::connection ee_up_path_change_connection;
+   bs2::connection ee_plmn_change_connection;
+   bs2::connection ee_ddds_connection;
+   bs2::connection ee_pdusesest;
+diff --git a/src/smf_app/smf_event.cpp b/src/smf_app/smf_event.cpp
+index 6b0b865..8d62295 100644
+--- a/src/smf_app/smf_event.cpp
++++ b/src/smf_app/smf_event.cpp
+@@ -29,6 +29,12 @@ bs2::connection smf_event::subscribe_ee_ue_ip_change(
+   return ee_ue_ip_change.connect(sig);
+ }
+ 
++//------------------------------------------------------------------------------
++bs2::connection smf_event::subscribe_ee_up_path_change(
++    const ee_up_path_change_sig_t::slot_type& sig) {
++  return ee_up_path_change.connect(sig);
++}
++
+ //------------------------------------------------------------------------------
+ bs2::connection smf_event::subscribe_ee_plmn_change(
+     const ee_plmn_change_sig_t::slot_type& sig) {
+diff --git a/src/smf_app/smf_event.hpp b/src/smf_app/smf_event.hpp
+index ad1e1de..ac59e89 100644
+--- a/src/smf_app/smf_event.hpp
++++ b/src/smf_app/smf_event.hpp
+@@ -51,6 +51,15 @@ class smf_event {
+   bs2::connection subscribe_ee_ue_ip_change(
+       const ee_ue_ip_change_sig_t::slot_type& sig);
+ 
++  /*
++   * Subscribe to Event Exposure Event: UP Path Change (TS 29.508 UP_PATH_CH)
++   * @param [const ee_up_path_change_sig_t::slot_type&] sig: slot_type parameter
++   * @return boost::signals2::connection: the connection between the signal and
++   * the slot
++   */
++  bs2::connection subscribe_ee_up_path_change(
++      const ee_up_path_change_sig_t::slot_type& sig);
++
+   bs2::connection subscribe_ee_plmn_change(
+       const ee_plmn_change_sig_t::slot_type& sig);
+ 
+@@ -71,6 +80,7 @@ class smf_event {
+   ee_pdu_session_release_sig_t
+       ee_pdu_session_release;             // Signal for PDU Session Release
+   ee_ue_ip_change_sig_t ee_ue_ip_change;  // Signal for UE IP Addr change
++  ee_up_path_change_sig_t ee_up_path_change;  // Signal for UP Path Change
+   ee_plmn_change_sig_t ee_plmn_change;    // Signal for UE IP Addr change
+   ee_ddds_sig_t ee_ddds;
+   ee_pdusesest_sig_t ee_pdusesest;  // Signal for  pdu session establishment
+diff --git a/src/smf_app/smf_event_sig.hpp b/src/smf_app/smf_event_sig.hpp
+index e58c62c..5e417c1 100644
+--- a/src/smf_app/smf_event_sig.hpp
++++ b/src/smf_app/smf_event_sig.hpp
+@@ -35,7 +35,25 @@ typedef bs2::signal_type<
+     ee_ue_ip_change_sig_t;
+ 
+ // TODO: Access Type Change
+-// TODO: UP Path Change
++
++// Signal for Event exposure
++// UP Path Change (TS 29.508 SmfEvent = UP_PATH_CH)
++// SCID, source DNAI, target DNAI, HTTP version
++//
++// WHY THIS EXISTS: TS 23.288 clause 6.14.2 routes DN Performance analytics'
++// SMF-side input through Table 6.4.2-2, which lists DNAI and UPF info as
++// SMF-sourced. UP_PATH_CH is the TS 29.508 event that carries them. This
++// replaces the "TODO: UP Path Change" placeholder that was already here.
++//
++// source_dnai is EMPTY on the first notification for a session: there is no
++// previous DNAI, and TS 29.508 makes sourceDnai conditional. An empty string
++// means "absent" and is not emitted on the wire (see smf_sbi.cpp).
++// CLASSIFICATION: OAI implementation gap - the SMF could already parse an
++// UP_PATH_CH subscription but never notified one.
++typedef bs2::signal_type<
++    void(scid_t, const std::string&, const std::string&, uint8_t),
++    bs2::keywords::mutex_type<bs2::dummy_mutex>>::type ee_up_path_change_sig_t;
++
+ // TODO: PLMN Change
+ typedef bs2::signal_type<
+     void(scid_t, uint8_t), bs2::keywords::mutex_type<bs2::dummy_mutex>>::type
+diff --git a/src/smf_app/smf_msg.cpp b/src/smf_app/smf_msg.cpp
+index 338b432..15b4334 100644
+--- a/src/smf_app/smf_msg.cpp
++++ b/src/smf_app/smf_msg.cpp
+@@ -1181,6 +1181,40 @@ bool event_notification::is_ad_ipv4_addr_is_set() const {
+   return m_ad_ipv4_addr_is_set;
+ }
+ 
++//-----------------------------------------------------------------------------
++// UP path change (UP_PATH_CH) - see smf_msg.hpp for the TS 23.288 / TS 29.508
++// justification.
++void event_notification::set_source_dnai(std::string const& value) {
++  m_source_dnai        = value;
++  m_source_dnai_is_set = true;
++}
++
++//-----------------------------------------------------------------------------
++std::string event_notification::get_source_dnai() const {
++  return m_source_dnai;
++}
++
++//-----------------------------------------------------------------------------
++bool event_notification::is_source_dnai_set() const {
++  return m_source_dnai_is_set;
++}
++
++//-----------------------------------------------------------------------------
++void event_notification::set_target_dnai(std::string const& value) {
++  m_target_dnai        = value;
++  m_target_dnai_is_set = true;
++}
++
++//-----------------------------------------------------------------------------
++std::string event_notification::get_target_dnai() const {
++  return m_target_dnai;
++}
++
++//-----------------------------------------------------------------------------
++bool event_notification::is_target_dnai_set() const {
++  return m_target_dnai_is_set;
++}
++
+ //-----------------------------------------------------------------------------
+ void event_notification::set_re_ipv4_addr(std::string const& value) {
+   m_re_ipv4_addr        = value;
+diff --git a/src/smf_app/smf_msg.hpp b/src/smf_app/smf_msg.hpp
+index 422aa84..24daad9 100644
+--- a/src/smf_app/smf_msg.hpp
++++ b/src/smf_app/smf_msg.hpp
+@@ -688,6 +688,30 @@ class event_notification {
+   std::string get_re_ipv4_addr() const;
+   bool is_re_ipv4_addr_is_set() const;
+ 
++  // ---------------------------------------------------------------------------
++  // UP path change (TS 29.508 SmfEvent = UP_PATH_CH).
++  //
++  // The members below already existed in this class as COMMENTED-OUT
++  // placeholders (m_SourceDnai / m_TargetDnai / m_DnaiChgType); this implements
++  // them rather than inventing new ones.
++  //
++  // WHY: TS 23.288 clause 6.14.2 routes DN Performance analytics' SMF-side
++  // input through Table 6.4.2-2, which lists DNAI and UPF info as SMF-sourced.
++  // UP_PATH_CH is the TS 29.508 event that carries them. Without it an NWDAF
++  // cannot know which DNAI a PDU session is using, and DN_PERFORMANCE - whose
++  // whole output is per-DNAI (TS 23.288 Table 6.14.3-1) - is not computable.
++  //
++  // The SMF could already PARSE an UP_PATH_CH subscription
++  // (smf_3gpp_conversions.cpp) but never notified one.
++  // CLASSIFICATION: OAI implementation gap.
++  void set_source_dnai(std::string const& value);
++  std::string get_source_dnai() const;
++  bool is_source_dnai_set() const;
++
++  void set_target_dnai(std::string const& value);
++  std::string get_target_dnai() const;
++  bool is_target_dnai_set() const;
++
+   // m_PlmnId
+   void set_PlmnId(oai::_3gpp::model::PlmnId const& value);
+   oai::_3gpp::model::PlmnId get_plmnid() const;
+@@ -769,11 +793,17 @@ class event_notification {
+ 
+   // std::string m_Gpsi;
+   // bool m_GpsiIsSet;
+-  // std::string m_SourceDnai;
+-  // bool m_SourceDnaiIsSet;
+-  // std::string m_TargetDnai;
+-  // bool m_TargetDnaiIsSet;
+-  // DnaiChangeType m_DnaiChgType;
++
++  // for a UP path change (UP_PATH_CH). Was a commented-out placeholder.
++  // m_source_dnai is left unset on the FIRST notification for a session (there
++  // is no previous DNAI to report) - TS 29.508 makes sourceDnai conditional.
++  std::string m_source_dnai{};
++  bool m_source_dnai_is_set{false};
++  std::string m_target_dnai{};
++  bool m_target_dnai_is_set{false};
++  // DnaiChangeType m_DnaiChgType;   // EARLY / LATE / EARLY_LATE - not produced:
++  // this SMF has no early-notification path (TS 23.502 clause 4.3.6.3), so
++  // reporting a change type would be inventing one.
+   // bool m_DnaiChgTypeIsSet;
+   // std::string m_TargetUeIpv4Addr;
+   // bool m_TargetUeIpv4AddrIsSet;
+diff --git a/src/smf_app/smf_pfcp_association.cpp b/src/smf_app/smf_pfcp_association.cpp
+index 092122b..cba586b 100644
+--- a/src/smf_app/smf_pfcp_association.cpp
++++ b/src/smf_app/smf_pfcp_association.cpp
+@@ -918,6 +918,226 @@ std::vector<std::shared_ptr<qos_upf_edge>> upf_graph::get_access_edges() const {
+   return n3_edges;
+ }
+ 
++//---------------------------------------------------------------------------------------------
++std::string upf_graph::get_n6_dnai() const {
++  std::shared_lock graph_lock(graph_mutex);
++
++  UPInterfaceType n6_type;
++  n6_type.setEnumValue(UPInterfaceType_anyOf::eUPInterfaceType_anyOf::N6);
++
++  for (const auto& [node, edges] : adjacency_list) {
++    for (const auto& edge : edges) {
++      if (edge && edge->type == n6_type && !edge->used_dnai.empty()) {
++        return edge->used_dnai;
++      }
++    }
++  }
++  // FALLBACK (see dnai_of_n6_edge above for the shared lookup): the edge
++  // carries no used_dnai.
++  //
++  // This is the NORMAL case at PDU session establishment. serves_network()
++  // only sets used_dnai when the selection criteria actually carried DNAIs;
++  // when they do not - "simple_mode" in create_subgraph_dfs() - the edge is
++  // bound to a network instance with no DNAI recorded against it. The DNAI is
++  // then not unknown at all: it is whichever DNAI the UPF advertises for that
++  // instance.
++  //
++  // Reverse-map it through the SAME UpfInfo dnaiNwInstanceList that
++  // apply_steering_dnai() uses forwards. This is a lookup in authoritative
++  // configuration (the UPF's own NRF profile), not an inference - so it is a
++  // real answer, not an invented one.
++  //
++  // WHY THIS MATTERS: without it a session established without DNAI criteria
++  // reports "no DNAI", which (a) suppressed the establishment UP_PATH_CH and
++  // (b) made the self-trigger's "am I already there?" damping check useless,
++  // so it re-asked for a DNAI the session was already on, forever.
++  for (const auto& [node, edges] : adjacency_list) {
++    for (const auto& edge : edges) {
++      if (!edge || edge->type != n6_type || edge->nw_instance.empty()) continue;
++      std::shared_ptr<pfcp_association> upf =
++          edge->source_upf ? edge->source_upf : edge->destination_upf;
++      if (!upf) continue;
++      const oai::config::smf::upf cfg = upf->get_upf_config();
++      for (const auto& snssai : cfg.get_upf_info().getSNssaiUpfInfoList()) {
++        for (const auto& dnn : snssai.getDnnUpfInfoList()) {
++          for (const auto& [dnai, nwi] : dnn.getDnaiNwInstanceList()) {
++            if (nwi == edge->nw_instance) return dnai;
++          }
++        }
++      }
++    }
++  }
++
++  // Genuinely nothing to report: no N6 edge, or an instance the UPF does not
++  // advertise a DNAI for. Absent, never invented.
++  return {};
++}
++
++//---------------------------------------------------------------------------------------------
++// Shared by get_n6_dnai() and get_n6_confirmed_dnai(): resolve a DNAI for an N6
++// edge, preferring the DNAI recorded on it and otherwise reverse-mapping its
++// network instance through the UpfInfo dnaiNwInstanceList.
++static std::string dnai_of_n6_edge(
++    const std::shared_ptr<qos_upf_edge>& edge, const std::string& dnai_field,
++    const std::string& nwi_field) {
++  if (!dnai_field.empty()) return dnai_field;
++  if (nwi_field.empty()) return {};
++  std::shared_ptr<pfcp_association> upf =
++      edge->source_upf ? edge->source_upf : edge->destination_upf;
++  if (!upf) return {};
++  const oai::config::smf::upf cfg = upf->get_upf_config();
++  for (const auto& snssai : cfg.get_upf_info().getSNssaiUpfInfoList()) {
++    for (const auto& dnn : snssai.getDnnUpfInfoList()) {
++      for (const auto& [dnai, nwi] : dnn.getDnaiNwInstanceList()) {
++        if (nwi == nwi_field) return dnai;
++      }
++    }
++  }
++  return {};
++}
++
++//---------------------------------------------------------------------------------------------
++std::string upf_graph::get_n6_confirmed_dnai() const {
++  std::shared_lock graph_lock(graph_mutex);
++
++  UPInterfaceType n6_type;
++  n6_type.setEnumValue(UPInterfaceType_anyOf::eUPInterfaceType_anyOf::N6);
++
++  for (const auto& [node, edges] : adjacency_list) {
++    for (const auto& edge : edges) {
++      if (!edge || edge->type != n6_type) continue;
++      const std::string d = dnai_of_n6_edge(
++          edge, edge->confirmed_dnai, edge->confirmed_nw_instance);
++      if (!d.empty()) return d;
++    }
++  }
++  // The UPF has acknowledged nothing for this session yet. Empty means
++  // "unknown", never "none".
++  return {};
++}
++
++//---------------------------------------------------------------------------------------------
++std::string upf_graph::confirm_n6_state() {
++  std::unique_lock graph_lock(graph_mutex);
++
++  UPInterfaceType n6_type;
++  n6_type.setEnumValue(UPInterfaceType_anyOf::eUPInterfaceType_anyOf::N6);
++
++  std::string confirmed = {};
++  for (auto& node : adjacency_list) {
++    for (auto& edge : node.second) {
++      if (!edge || edge->type != n6_type) continue;
++      edge->confirmed_nw_instance = edge->nw_instance;
++      edge->confirmed_dnai        = edge->used_dnai;
++      if (confirmed.empty()) {
++        confirmed = dnai_of_n6_edge(
++            edge, edge->confirmed_dnai, edge->confirmed_nw_instance);
++      }
++    }
++  }
++  return confirmed;
++}
++
++//---------------------------------------------------------------------------------------------
++bool upf_graph::rollback_unconfirmed_n6_state() {
++  std::unique_lock graph_lock(graph_mutex);
++
++  UPInterfaceType n6_type;
++  n6_type.setEnumValue(UPInterfaceType_anyOf::eUPInterfaceType_anyOf::N6);
++
++  bool rolled_back = false;
++  for (auto& node : adjacency_list) {
++    for (auto& edge : node.second) {
++      if (!edge || edge->type != n6_type) continue;
++      // Nothing acknowledged yet: there is no earlier state to restore, and
++      // blanking the instance would leave the edge unusable.
++      if (edge->confirmed_nw_instance.empty()) continue;
++      if (edge->nw_instance == edge->confirmed_nw_instance &&
++          edge->used_dnai == edge->confirmed_dnai) {
++        continue;
++      }
++      Logger::smf_app().warn(
++          "Steering rollback: N6 edge intent '%s' was never acknowledged by the "
++          "UPF; restoring the confirmed instance '%s'",
++          edge->nw_instance.c_str(), edge->confirmed_nw_instance.c_str());
++      edge->nw_instance         = edge->confirmed_nw_instance;
++      edge->used_dnai           = edge->confirmed_dnai;
++      edge->n4_update_necessary = false;
++      rolled_back               = true;
++    }
++  }
++  return rolled_back;
++}
++
++//---------------------------------------------------------------------------------------------
++bool upf_graph::apply_steering_dnai(const std::string& dnai) {
++  std::unique_lock graph_lock(graph_mutex);
++  bool changed = false;
++
++  UPInterfaceType n6_type;
++  n6_type.setEnumValue(UPInterfaceType_anyOf::eUPInterfaceType_anyOf::N6);
++
++  for (auto& node : adjacency_list) {
++    for (auto& edge : node.second) {
++      if (!edge || edge->type != n6_type) continue;
++
++      // The UPF that owns this N6 interface: for an N6 edge the association is
++      // reachable through either endpoint depending on direction.
++      std::shared_ptr<pfcp_association> upf =
++          edge->source_upf ? edge->source_upf : edge->destination_upf;
++      if (!upf) continue;
++
++      // Same lookup as qos_upf_edge::associate_dnai(): UpfInfo advertises a
++      // dnaiNwInstanceList per DNN, mapping DNAI -> network instance.
++      const oai::config::smf::upf cfg = upf->get_upf_config();
++      for (const auto& snssai : cfg.get_upf_info().getSNssaiUpfInfoList()) {
++        for (const auto& dnn : snssai.getDnnUpfInfoList()) {
++          const auto& instances = dnn.getDnaiNwInstanceList();
++          const auto find       = instances.find(dnai);
++          if (find == instances.end()) continue;
++          if (find->second.empty() || find->second == edge->nw_instance) continue;
++
++          // The DNAI list of a DNN also contains the access-side DNAI, which
++          // maps to the N3 network instance. Only accept a candidate that the
++          // UPF actually advertises on an N6 interface, otherwise a steering
++          // decision could bind an N6 edge to the access instance.
++          bool is_n6 = false;
++          for (const auto& iface :
++               cfg.get_upf_info().getInterfaceUpfInfoList()) {
++            if (iface.getInterfaceType() == n6_type &&
++                iface.getNetworkInstance() == find->second) {
++              is_n6 = true;
++              break;
++            }
++          }
++          if (!is_n6) {
++            Logger::smf_app().debug(
++                "Steering: ignoring DNAI '%s' -> '%s' (not an N6 instance)",
++                dnai.c_str(), find->second.c_str());
++            continue;
++          }
++
++          Logger::smf_app().info(
++              "Steering: DNAI '%s' -> network instance '%s' (was '%s')",
++              dnai.c_str(), find->second.c_str(), edge->nw_instance.c_str());
++          edge->nw_instance         = find->second;
++          edge->used_dnai           = dnai;
++          edge->n4_update_necessary = true;
++          changed                   = true;
++        }
++      }
++    }
++  }
++
++  if (!changed) {
++    Logger::smf_app().warn(
++        "Steering: DNAI '%s' did not resolve to a new network instance on any "
++        "N6 edge of this session",
++        dnai.c_str());
++  }
++  return changed;
++}
++
+ //---------------------------------------------------------------------------------------------
+ std::shared_ptr<upf_graph> upf_graph::select_upf_nodes(
+     const upf_selection_criteria& base_criteria) {
+@@ -936,6 +1156,39 @@ std::shared_ptr<upf_graph> upf_graph::select_upf_nodes(
+ //------------------------------------------------------------------------------
+ // TODO in the current implementation, UL CL needs to be the first node,
+ // otherwise it is not explored anymore when graph is merged
++//------------------------------------------------------------------------------
++// See smf_pfcp_association.hpp for why this is policy and not UPF capability,
++// and why it deliberately duplicates the traversal in select_upf_nodes()
++// rather than refactoring it.
++// NOTE: this file opens with `using namespace oai::app::smf;` rather than a
++// namespace block, so a free function must be defined with its qualified name -
++// otherwise it lands in the global namespace and the link fails with an
++// undefined reference to oai::app::smf::get_authorized_dnais.
++std::map<uint32_t, std::set<std::string>>
++oai::app::smf::get_authorized_dnais(const SmPolicyDecision& decision) {
++  std::map<uint32_t, std::set<std::string>> authorized = {};
++
++  if (!decision.pccRulesIsSet()) return authorized;
++  auto traffic_conts = decision.getTraffContDecs();
++
++  for (const auto& rule : decision.getPccRules()) {
++    if (rule.second.getRefTcData().empty()) continue;
++    // First traffic control only - TS 29.512 table 5.6.2.6-1 Note 1, the same
++    // rule select_upf_nodes() applies.
++    const auto traffic_it = traffic_conts.find(rule.second.getRefTcData()[0]);
++    if (traffic_it == traffic_conts.end()) continue;
++    if (!traffic_it->second.routeToLocsIsSet()) continue;
++
++    const uint32_t precedence = rule.second.getPrecedence();
++    for (const auto& route : traffic_it->second.getRouteToLocs()) {
++      if (route.getDnai().empty()) continue;
++      authorized[precedence].insert(route.getDnai());
++    }
++  }
++  return authorized;
++}
++
++//------------------------------------------------------------------------------
+ std::shared_ptr<upf_graph> upf_graph::select_upf_nodes(
+     const SmPolicyDecision& policy_decision,
+     const upf_selection_criteria& base_criteria) {
+diff --git a/src/smf_app/smf_pfcp_association.hpp b/src/smf_app/smf_pfcp_association.hpp
+index d2679e0..67eebd0 100644
+--- a/src/smf_app/smf_pfcp_association.hpp
++++ b/src/smf_app/smf_pfcp_association.hpp
+@@ -6,6 +6,7 @@
+ #define FILE_SMF_PFCP_ASSOCIATION_HPP_SEEN
+ 
+ #include <map>
++#include <set>
+ #include <mutex>
+ #include <utility>
+ #include <vector>
+@@ -327,6 +328,24 @@ class upf_graph {
+    * @return true in case the UPF selection was successfull, false e.g. if there
+    * are unvisited UL UPFs
+    */
++  /**
++   * @brief Re-applies a traffic-steering decision to an already-established
++   * session graph by re-resolving a DNAI to a UPF network instance and
++   * writing it onto the N6 edges.
++   *
++   * Route 2: used on the PCF-initiated modification path, where the session
++   * already exists and must be steered to a different N6 network instance
++   * without re-running UPF selection or re-establishing the session.
++   *
++   * Uses the same DNAI -> network-instance mapping as
++   * qos_upf_edge::associate_dnai(), i.e. the UpfInfo dnaiNwInstanceList that
++   * the UPF advertises through its NRF profile.
++   *
++   * @param dnai the target DNAI from the updated SmPolicyDecision
++   * @return true if at least one N6 edge was re-bound to a new instance
++   */
++  bool apply_steering_dnai(const std::string& dnai);
++
+   bool dfs_next_upf(
+       std::vector<std::shared_ptr<qos_upf_edge>>& info_dl,
+       std::vector<std::shared_ptr<qos_upf_edge>>& info_ul,
+@@ -358,6 +377,63 @@ class upf_graph {
+    */
+   std::vector<std::shared_ptr<qos_upf_edge>> get_access_edges() const;
+ 
++  /**
++   * @brief Returns the DNAI this session's N6 edge is currently bound to.
++   *
++   * Read-only counterpart of apply_steering_dnai(): that method WRITES
++   * edge->used_dnai, this one reads it back. Used to report the DNAI a PDU
++   * session is on over TS 29.508 UP_PATH_CH, which is the input TS 23.288
++   * Table 6.4.2-2 names as SMF-sourced for DN Performance analytics.
++   *
++   * The value originates either from qos_upf_edge::associate_dnai() at
++   * establishment or from apply_steering_dnai() after a steer, so it is the
++   * DNAI actually programmed into the FAR/PDR network instance, not a policy
++   * intent.
++   *
++   * @return the used DNAI of the first N6 edge, or an EMPTY string if this
++   *         graph has no N6 edge or the edge carries no DNAI. Empty means
++   *         "unknown", never "none" - the caller must not report it.
++   */
++  std::string get_n6_dnai() const;
++
++  /**
++   * @brief The DNAI the UPF has ACKNOWLEDGED this session's N6 path is on.
++   *
++   * Same lookup as get_n6_dnai(), but reads the CONFIRMED fields - the ones
++   * only written when an N4 response arrives with REQUEST_ACCEPTED. Use this
++   * for "is the session already where we want it?" and for reporting what the
++   * network is actually doing; use get_n6_dnai() for what was decided.
++   *
++   * @return the confirmed DNAI, or EMPTY if the UPF has not acknowledged any
++   *         N6 binding for this session yet.
++   */
++  std::string get_n6_confirmed_dnai() const;
++
++  /**
++   * @brief Promote intent to confirmed for every N6 edge.
++   *
++   * Called ONLY from an N4 Session Establishment/Modification Response handler
++   * that saw cause REQUEST_ACCEPTED. After this, intent and confirmed agree.
++   *
++   * @return the DNAI now confirmed, or empty if there is no N6 edge
++   */
++  std::string confirm_n6_state();
++
++  /**
++   * @brief Discard unconfirmed intent: put every N6 edge back to what the UPF
++   * last acknowledged.
++   *
++   * Called when an N4 modification FAILS. Without it the graph would keep
++   * claiming a binding the UPF rejected, and every later comparison would be
++   * made against a fiction.
++   *
++   * Edges with no confirmed state yet are left alone: there is nothing to
++   * restore, and blanking the instance would be worse than the inconsistency.
++   *
++   * @return true if any edge was rolled back
++   */
++  bool rollback_unconfirmed_n6_state();
++
+   /**
+    * @brief: Debug-prints the current graph
+    */
+@@ -480,6 +556,35 @@ class pfcp_associations {
+   bool remove_association(const int32_t& hash_node_id);
+ };
+ 
++/**
++ * @brief The DNAIs the PCF has AUTHORIZED for a session, grouped by the
++ * precedence of the PCC rule that authorized them.
++ *
++ * This is policy, not capability. It is deliberately NOT derived from
++ * qos_upf_edge::dnai_dnn_slices, which is what the UPF advertises it can serve
++ * (its NRF UpfInfo dnaiNwInstanceList) - using that as authorization would let
++ * the SMF steer to any DNAI the UPF happens to support, bypassing the PCF.
++ *
++ * Traversal mirrors upf_graph::select_upf_nodes(SmPolicyDecision, ...):
++ * pccRules -> refTcData[0] -> traffContDecs -> routeToLocs[] -> dnai, taking
++ * only the FIRST traffic control per rule ("as defined in the standard, see
++ * Note 1 in table 5.6.2.6-1 in TS29.512"). Both readers must stay in sync; the
++ * establishment path was left untouched on purpose so this change cannot
++ * regress UPF selection.
++ *
++ * TS 23.503 clause 6 ("AF influenced Traffic Steering Enforcement Control"):
++ * the PCC rule carries "a set of DNAI(s) (i.e. a reference to the DNAI(s) the
++ * SMF needs to consider for UPF selection/reselection)".
++ * TS 23.503: "The PCF provides DNAI(s) in the PCC rule(s) to the SMF".
++ *
++ * @param decision the SmPolicyDecision as received from the PCF
++ * @return precedence -> set of DNAIs authorized at that precedence. Lower
++ *         precedence value = higher priority (TS 29.512), so begin() is the
++ *         winning rule.
++ */
++std::map<uint32_t, std::set<std::string>> get_authorized_dnais(
++    const oai::_3gpp::model::SmPolicyDecision& decision);
++
+ }  // namespace oai::app::smf
+ 
+ #endif /* FILE_SMF_PFCP_ASSOCIATION_HPP_SEEN */
+diff --git a/src/smf_app/smf_procedure.cpp b/src/smf_app/smf_procedure.cpp
+index b6babe1..40f7c6a 100644
+--- a/src/smf_app/smf_procedure.cpp
++++ b/src/smf_app/smf_procedure.cpp
+@@ -597,6 +597,21 @@ pfcp::update_far smf_session_procedure::pfcp_update_far(
+     destination_interface.interface_value = pfcp::INTERFACE_VALUE_ACCESS;
+   }
+   update_forwarding_parameters.set(destination_interface);
++
++  //-------------------
++  // Network Instance
++  //-------------------
++  // Route 2: without this IE an Update FAR cannot move a session between N6
++  // network instances. pfcp_create_far() already sets it; this is the
++  // modification-path counterpart. Verified against upg-vpp
++  // handle_update_far(), which resolves UPDATE_FORWARDING_PARAMETERS_
++  // NETWORK_INSTANCE via lookup_nwi() and rebinds the FAR to the new FIB.
++  if (!edge->nw_instance.empty()) {
++    pfcp::network_instance_t network_instance = {};
++    network_instance.network_instance         = edge->nw_instance;
++    update_forwarding_parameters.set(network_instance);
++  }
++
+   if (pfcp_outer_header_creation(edge, outer_header_creation)) {
+     update_forwarding_parameters.set(outer_header_creation);
+   }
+@@ -1172,6 +1187,21 @@ smf_procedure_code session_create_sm_context_procedure::handle_itti_msg(
+     return smf_procedure_code::ERROR;
+   }
+ 
++  // The UPF accepted the session. Record the N6 binding it acknowledged as the
++  // CONFIRMED state, so that every later comparison has a real baseline to work
++  // from. Without this the first steer would have nothing to roll back to if
++  // its N4 update failed.
++  if (sps && sps->get_session_handler() &&
++      sps->get_session_handler()->get_session_graph()) {
++    const std::string confirmed =
++        sps->get_session_handler()->get_session_graph()->confirm_n6_state();
++    if (!confirmed.empty()) {
++      Logger::smf_app().debug(
++          "N4 Session Establishment accepted: confirmed N6 DNAI '%s'",
++          confirmed.c_str());
++    }
++  }
++
+   std::shared_ptr<pfcp_association> current_upf = {};
+   std::vector<std::shared_ptr<qos_upf_edge>> dl_edges;
+   std::vector<std::shared_ptr<qos_upf_edge>> ul_edges;
+@@ -1399,10 +1429,28 @@ smf_procedure_code session_update_sm_context_procedure::run(
+   sps->get_session_handler()->set_qfis_to_be_updated(
+       list_of_qfis_to_be_modified);
+ 
+-  if (!is_qfi_served_in_edges(
+-          list_of_qfis_to_be_modified, dl_edges, dl_edges_to_update) ||
+-      !is_qfi_served_in_edges(
+-          list_of_qfis_to_be_modified, ul_edges, ul_edges_to_update)) {
++  // Route 2: a PCF-initiated traffic-steering modification re-binds the N6
++  // network instance of an established session. It carries no QoS-flow list,
++  // and is_qfi_served_in_edges() returns false for an empty list ("QFIs are
++  // not served in edges, because list of QFIs is empty"), so the guard below
++  // rejected every steering update. Skip it for that case only - a
++  // PCF-initiated modification that does carry QFIs is still validated.
++  // A traffic-steering modification carries no QoS-flow list, whoever asked for
++  // it. Both the PCF-initiated (Route 2) and the SMF-initiated (NWDAF) forms
++  // must therefore bypass the QFI guard; one that DOES carry QFIs is still
++  // validated.
++  const bool steering_only_modification =
++      (session_procedure_type == session_management_procedures_type_e::
++                                     PDU_SESSION_MODIFICATION_PCF_INITIATED ||
++       session_procedure_type == session_management_procedures_type_e::
++                                     PDU_SESSION_MODIFICATION_SMF_REQUESTED) &&
++      list_of_qfis_to_be_modified.empty();
++
++  if (!steering_only_modification &&
++      (!is_qfi_served_in_edges(
++           list_of_qfis_to_be_modified, dl_edges, dl_edges_to_update) ||
++       !is_qfi_served_in_edges(
++           list_of_qfis_to_be_modified, ul_edges, ul_edges_to_update))) {
+     // TODO check on NAS, maybe can reject some QFIs and accept others?
+     Logger::smf_app().error(
+         "PDU Session establishment modification failed. Wrong QFI. Sending "
+@@ -1421,10 +1469,15 @@ smf_procedure_code session_update_sm_context_procedure::run(
+   sm_context_req_msg.get_dl_fteid(gnb_fteid);
+ 
+   switch (session_procedure_type) {
++    // NOTE: PDU_SESSION_MODIFICATION_SMF_REQUESTED used to be listed here.
++    // It was dead code - nothing in OAI ever constructed that procedure type -
++    // and this group does DL F-TEID handling plus a QFI-based modification,
++    // which is the wrong shape for the only thing that now produces it: an
++    // SMF-initiated traffic-steering reconfiguration, which changes an N6
++    // network instance and touches no QoS flow and no AN tunnel. It is handled
++    // with the steering case below instead.
+     case session_management_procedures_type_e::
+         PDU_SESSION_ESTABLISHMENT_UE_REQUESTED:
+-    case session_management_procedures_type_e::
+-        PDU_SESSION_MODIFICATION_SMF_REQUESTED:
+     case session_management_procedures_type_e::
+         PDU_SESSION_MODIFICATION_AN_REQUESTED:
+     case session_management_procedures_type_e::
+@@ -1531,10 +1584,82 @@ smf_procedure_code session_update_sm_context_procedure::run(
+       send_n4 = true;
+     } break;
+ 
++    // Both traffic-steering modifications land here: the PCF-initiated one
++    // (Route 2, AF -> PCF -> SMF) and the SMF-initiated one (NWDAF analytics,
++    // no AF involved). They differ only in WHO decided; what reaches the UPF is
++    // identical - re-bind the N6 edge's network instance on its FAR and PDR.
++    case session_management_procedures_type_e::
++        PDU_SESSION_MODIFICATION_SMF_REQUESTED:
+     case session_management_procedures_type_e::
+         PDU_SESSION_MODIFICATION_PCF_INITIATED: {
+-      // TODO:
+-      send_n4 = false;
++      // Route 2: apply a PCF-initiated traffic-steering change to the UPF.
++      //
++      // The new network instance has already been resolved from the updated
++      // SmPolicyDecision (DNAI -> NWI) and written onto the N6 edges by
++      // smf_context::handle_pdu_session_update_sm_context_request(), which
++      // flags every edge it re-bound with n4_update_necessary.
++      //
++      // BOTH PFCP rules of that N6 edge must be updated. This was established
++      // empirically: updating only the FAR moves egress to the new N6 instance
++      // but leaves the downlink PDR matching on the old one, so return traffic
++      // matches no PDR and is silently dropped. See PROJECT-HISTORY.md 10.9.
++      //
++      // Both rules live on the SAME edge. select_upf_nodes() marks every N6
++      // edge uplink = true, so an N6 edge lands in ul_edges and owns
++      //   - the uplink FAR   (destination interface Core, carries the N6
++      //     network instance)            -> FAR 1 in a single-UPF session
++      //   - the downlink PDR (source interface Core, matches on the N6
++      //     network instance)            -> PDR 2 in a single-UPF session
++      // dl_edges holds the N3 edge, whose access-side instance does not change
++      // and which must NOT be touched: pfcp_update_pdr() hardcodes source
++      // interface Core, so applying it to the N3 edge would overwrite the
++      // uplink PDR with a downlink classifier and break the session.
++      //
++      // pfcp_update_pdr() re-sends associated_edge->far_id, which upg-vpp
++      // requires because it REPLACES rather than merges a PDR (10.9).
++      std::vector<std::shared_ptr<qos_upf_edge>> steered_edges = {};
++      for (const auto& edge : ul_edges) {
++        if (edge && edge->n4_update_necessary) {
++          steered_edges.push_back(edge);
++        }
++      }
++
++      Logger::smf_app().info(
++          "%s: re-applying network "
++          "instance to UPF (%u re-steered N6 edge(s); %u UL, %u DL)",
++          session_management_procedures_type_e2str
++              .at(static_cast<int>(session_procedure_type))
++              .c_str(),
++          (unsigned) steered_edges.size(), (unsigned) ul_edges.size(),
++          (unsigned) dl_edges.size());
++
++      for (const auto& edge : steered_edges) {
++        if (edge->far_id.far_id != 0) {
++          Logger::smf_app().info(
++              "Steering: Update FAR %u -> network instance '%s'",
++              edge->far_id.far_id, edge->nw_instance.c_str());
++          n4_triggered->pfcp_ies.set(pfcp_update_far(edge));
++          send_n4 = true;
++        }
++        if (edge->pdr_id.rule_id != 0 && edge->associated_edge) {
++          Logger::smf_app().info(
++              "Steering: Update PDR %u -> network instance '%s' (keeps FAR %u)",
++              edge->pdr_id.rule_id, edge->nw_instance.c_str(),
++              edge->associated_edge->far_id.far_id);
++          n4_triggered->pfcp_ies.set(pfcp_update_pdr(edge));
++          send_n4 = true;
++        }
++        edge->n4_update_necessary = false;
++      }
++
++      if (!send_n4) {
++        Logger::smf_app().warn(
++            "%s: no re-steered N6 edge carried a usable FAR/PDR id, nothing to "
++            "send on N4",
++            session_management_procedures_type_e2str
++                .at(static_cast<int>(session_procedure_type))
++                .c_str());
++      }
+     } break;
+ 
+     default: {
+@@ -1577,6 +1702,26 @@ smf_procedure_code session_update_sm_context_procedure::handle_itti_msg(
+   n11_triggered_pending->res.set_cause(k5gsmCauseRequestRejectedUnspecified);
+ 
+   if (cause.cause_value != CAUSE_VALUE_REQUEST_ACCEPTED) {
++    // The UPF REJECTED this modification. Anything the SMF wrote onto the N6
++    // edges in anticipation is now a fiction, so discard it and go back to what
++    // the UPF last acknowledged. Without this the control plane keeps claiming
++    // a DNAI the UPF never accepted, and every later "am I already there?"
++    // check is made against that fiction - the session is then never retried
++    // and never corrected. See PROJECT-HISTORY 19.7 item 1.
++    if (sps && sps->get_session_handler() &&
++        sps->get_session_handler()->get_session_graph()) {
++      if (sps->get_session_handler()
++              ->get_session_graph()
++              ->rollback_unconfirmed_n6_state()) {
++        Logger::smf_app().warn(
++            "N4 Session Modification was rejected by the UPF (cause %d): the "
++            "session's N6 state has been rolled back to the last confirmed "
++            "binding, so the next analytics poll will see the real state and "
++            "may retry",
++            (int) cause.cause_value);
++      }
++    }
++
+     // Nsmf_PDUSession_SMContextStatusNotify: If the PDU Session establishment
+     // is not successful, the SMF informs the AMF by invoking
+     // Nsmf_PDUSession_SMContextStatusNotify (Release). The
+@@ -1619,10 +1764,28 @@ smf_procedure_code session_update_sm_context_procedure::handle_itti_msg(
+     return smf_procedure_code::ERROR;
+   }
+   // TODO put in helper function or make a get_current_upf with this
+-  if (!is_qfi_served_in_edges(
+-          list_of_qfis_to_be_modified, dl_edges, dl_edges_to_update) ||
+-      !is_qfi_served_in_edges(
+-          list_of_qfis_to_be_modified, ul_edges, ul_edges_to_update)) {
++  // Route 2: a PCF-initiated traffic-steering modification re-binds the N6
++  // network instance of an established session. It carries no QoS-flow list,
++  // and is_qfi_served_in_edges() returns false for an empty list ("QFIs are
++  // not served in edges, because list of QFIs is empty"), so the guard below
++  // rejected every steering update. Skip it for that case only - a
++  // PCF-initiated modification that does carry QFIs is still validated.
++  // A traffic-steering modification carries no QoS-flow list, whoever asked for
++  // it. Both the PCF-initiated (Route 2) and the SMF-initiated (NWDAF) forms
++  // must therefore bypass the QFI guard; one that DOES carry QFIs is still
++  // validated.
++  const bool steering_only_modification =
++      (session_procedure_type == session_management_procedures_type_e::
++                                     PDU_SESSION_MODIFICATION_PCF_INITIATED ||
++       session_procedure_type == session_management_procedures_type_e::
++                                     PDU_SESSION_MODIFICATION_SMF_REQUESTED) &&
++      list_of_qfis_to_be_modified.empty();
++
++  if (!steering_only_modification &&
++      (!is_qfi_served_in_edges(
++           list_of_qfis_to_be_modified, dl_edges, dl_edges_to_update) ||
++       !is_qfi_served_in_edges(
++           list_of_qfis_to_be_modified, ul_edges, ul_edges_to_update))) {
+     // TODO check on NAS, maybe can reject some QFIs and accept others?
+     Logger::smf_app().error(
+         "PDU Session establishment modification failed. Wrong QFI. Sending "
+@@ -1649,10 +1812,10 @@ smf_procedure_code session_update_sm_context_procedure::handle_itti_msg(
+     Logger::smf_app().debug("QoS Flow context to be modified QFI %d", it.first);
+ 
+   switch (session_procedure_type) {
++    // See the note in the N4-request switch: SMF_REQUESTED is a steering-only
++    // modification here and is handled with the steering case below.
+     case session_management_procedures_type_e::
+         PDU_SESSION_ESTABLISHMENT_UE_REQUESTED:
+-    case session_management_procedures_type_e::
+-        PDU_SESSION_MODIFICATION_SMF_REQUESTED:
+     case session_management_procedures_type_e::
+         PDU_SESSION_MODIFICATION_AN_REQUESTED:
+     case session_management_procedures_type_e::
+@@ -1715,10 +1878,42 @@ smf_procedure_code session_update_sm_context_procedure::handle_itti_msg(
+       continue_n4 = false;
+     } break;
+ 
++    case session_management_procedures_type_e::
++        PDU_SESSION_MODIFICATION_SMF_REQUESTED:
+     case session_management_procedures_type_e::
+         PDU_SESSION_MODIFICATION_PCF_INITIATED: {
+       continue_n4 = false;
+-      // TODO:
++
++      // The UPF has ACKNOWLEDGED the steer. Promote intent to confirmed, and
++      // only now report it on TS 29.508 UP_PATH_CH.
++      //
++      // Reporting moved here from smf_context.cpp, where it fired when the SMF
++      // decided rather than when the UPF agreed - PROJECT-HISTORY 18.2 recorded
++      // that as an honest limitation. An NWDAF that attributes traffic to a
++      // DNAI must be told what the UPF is actually doing, not what the SMF
++      // hoped it would do.
++      if (sps && sps->get_session_handler() &&
++          sps->get_session_handler()->get_session_graph()) {
++        const std::shared_ptr<upf_graph> graph =
++            sps->get_session_handler()->get_session_graph();
++        const std::string previous = graph->get_n6_confirmed_dnai();
++        const std::string current  = graph->confirm_n6_state();
++        if (!current.empty() && current != previous && sc) {
++          scid_t up_path_scid = {};
++          try {
++            up_path_scid = (scid_t) std::stoul(n11_trigger->scid, nullptr, 0);
++            // previous is empty for the first confirmation of a session; an
++            // empty sourceDnai is omitted from the notification (TS 29.508
++            // makes it conditional), never sent as "".
++            sc->trigger_up_path_change(up_path_scid, previous, current, 1);
++          } catch (const std::exception& e) {
++            Logger::smf_app().warn(
++                "Could not report the confirmed UP path change, invalid SM "
++                "context ID '%s' (%s)",
++                n11_trigger->scid.c_str(), e.what());
++          }
++        }
++      }
+     } break;
+ 
+     default: {
+diff --git a/src/smf_app/smf_qos_upf_edge.hpp b/src/smf_app/smf_qos_upf_edge.hpp
+index 70e424b..ebc9291 100644
+--- a/src/smf_app/smf_qos_upf_edge.hpp
++++ b/src/smf_app/smf_qos_upf_edge.hpp
+@@ -72,9 +72,29 @@ class qos_upf_edge {
+   pfcp::urr_id_t urr_id{};
+   uint8_t qos_rule_id{};
+ 
++  // INTENT: what the SMF has decided this edge should be bound to. Written by
++  // qos_upf_edge::serves_network() at selection and by
++  // upf_graph::apply_steering_dnai() on a steer - both BEFORE any PFCP message
++  // is sent.
+   std::string nw_instance{};
+   std::string used_dnai{};
+ 
++  // CONFIRMED: what the UPF has actually acknowledged, updated ONLY when an N4
++  // Session Establishment/Modification Response arrives with cause
++  // REQUEST_ACCEPTED (upf_graph::confirm_n6_state()).
++  //
++  // WHY THE DISTINCTION EXISTS. Before this, the graph recorded intent only, so
++  // a PFCP update that failed or never arrived left the control plane claiming
++  // one DNAI while the UPF forwarded on another - permanently, because every
++  // "am I already there?" check read the intent and concluded there was nothing
++  // to do. That is PROJECT-HISTORY 19.7 item 1, and 19.3 defect 3 was that exact
++  // failure mode made visible.
++  //
++  // Rule of thumb: policy decisions read the INTENT (that is what was chosen),
++  // damping and reporting read the CONFIRMED state (that is what is true).
++  std::string confirmed_nw_instance{};
++  std::string confirmed_dnai{};
++
+   std::vector<dnai_dnn_slice> dnai_dnn_slices{};
+ 
+   bool uplink              = false;
+diff --git a/src/smf_app/smf_sbi.cpp b/src/smf_app/smf_sbi.cpp
+index f389987..5bffe40 100644
+--- a/src/smf_app/smf_sbi.cpp
++++ b/src/smf_app/smf_sbi.cpp
+@@ -377,6 +377,18 @@ void smf_sbi::notify_subscribed_event(
+       event_notif["reIpv4Addr"] = i.get_re_ipv4_addr();
+     }
+ 
++    // UP path change (TS 29.508 UP_PATH_CH). sourceDnai is conditional: it is
++    // absent on the first notification for a session, because there is no
++    // previous DNAI. sourceTraRouting/targetTraRouting are deliberately NOT
++    // emitted - this SMF does not model a RouteToLocation, and inventing one
++    // would put a fabricated value on a standard interface.
++    if (i.is_source_dnai_set()) {
++      event_notif["sourceDnai"] = i.get_source_dnai();
++    }
++    if (i.is_target_dnai_set()) {
++      event_notif["targetDnai"] = i.get_target_dnai();
++    }
++
+     // add support for plmn change.
+     if (i.is_plmnid_is_set()) {
+       event_notif["plmnId"] = i.get_plmnid();
