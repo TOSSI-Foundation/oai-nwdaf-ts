@@ -24,16 +24,35 @@ SMF only ever selects **within** what the PCF allowed.
 Same SUPI, same PDU session, **same UE IP**, path changes underneath — validated with
 0 new PDU sessions, 0 re-registrations and 0% packet loss in both directions.
 
-## Status — read this before quoting results
+## Status - read this before quoting results
 
-| Claim | Status |
+Working today:
+
+| Part | State |
 |---|---|
-| `DN_PERFORMANCE` per DNAI, consumed by the SMF over `Nnwdaf_AnalyticsInfo` | ✅ working |
-| PCF-authorized DNAI selection, PFCP FAR+PDR actuation | ✅ working |
-| Per-DNAI N6 path health with an explicit UNKNOWN state | ✅ working |
-| Steering **decision quality** | ⚠️ ranks on `avg_traffic_rate_bps` — **offered load, not path quality** |
-| Reversibility | ⚠️ one-way: the ranking cannot return to an idle path |
-| Packet delay / loss | 🔴 not measurable in this deployment |
+| `DN_PERFORMANCE` per DNAI, consumed by the SMF over `Nnwdaf_AnalyticsInfo` | Working |
+| PCF-authorized DNAI selection, PFCP FAR + PDR actuation | Working |
+| Per-DNAI N6 path health, with an explicit UNKNOWN state | Working |
+| Live session moved with no re-attach and no IP change | Working |
+
+Known limits, and whether they can be fixed:
+
+| Limit | What it means | Status |
+|---|---|---|
+| Packet delay and packet loss are not available as 3GPP metrics | The SMF returns null for delay, and nothing in this dataplane counts a dropped packet. | Partly. The standards path is genuinely blocked: `smf.qosmonlist` already carries `uldelays`/`dldelays`/`rtdelays` and the SMF already implements the handlers, but the UPF plugin does not implement the TS 29.244 QoS-Monitoring IEs, so the fields stay null. An ICMP probe per N6 interface does measure delay, jitter and loss (78 ms / 11.8 ms / 6.7 % on an impaired path vs 0.2 / 0.2 / 0 healthy) — but it crosses the kernel veth path, not the forwarding path, so it must never be reported as a 3GPP KPI. |
+| Migration is paced but not capped | Serialization moves one session per cycle; it does not limit how many move in total. While the source path looks degraded, sessions keep leaving it. | Partly, by feedback. When degradation is load-induced the path recovers as sessions leave and the rest hold — observed holding for ~95 s. But it is emergent, not controllable, and a single transient degraded sample can release the last session. |
+| "Broken" and "overloaded" are indistinguishable | Both present as `OBSERVED_DEGRADED`, but the right response differs: evacuate a broken path, move only some sessions off an overloaded one. | No. Separating them needs per-session load plus a capacity model, neither of which exists here. |
+| A hard failure that stops traffic is invisible | No transmit attempt can fail, so the path reads `UNKNOWN`, not `DEGRADED`. | No. Structural: an idle impaired path is byte-for-byte identical to an idle healthy one. |
+
+Two limits listed in earlier revisions are **fixed**, both opt-in via
+`SMF_NWDAF_DNPERF_RULE=HEALTH` (the default stays `RATE`, the original behaviour):
+
+| Was | Now |
+|---|---|
+| Ranked on `avg_traffic_rate_bps` — offered load, not path quality | The `HEALTH` rule gates on per-DNAI path health and steers only **away** from a path observed degraded. Detection dropped from a 300 s average to a 5 s interval, and steer latency from minutes to ≤10 s. |
+| One-way: could not return to an idle path | Reversible. UNKNOWN is never read as healthy, and a decaying memory of recently-degraded paths prevents flapping. A→B→A driven by measurement, validated. |
+
+See [docs/MULTI-UE-STEERING.md](docs/MULTI-UE-STEERING.md).
 
 The path-health signal is an **AF_PACKET transmit-stall indicator specific to this
 VPP-on-veth lab**. It is **not** packet loss and **not** a 3GPP metric. See

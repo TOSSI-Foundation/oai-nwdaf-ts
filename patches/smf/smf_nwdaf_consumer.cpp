@@ -11,8 +11,12 @@
 
 #include "smf_nwdaf_consumer.hpp"
 
+#include "smf_nwdaf_steer_serialization.hpp"
+
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <nlohmann/json.hpp>
 
 #include "http_client.hpp"
@@ -186,6 +190,34 @@ void smf_nwdaf_consumer::start() {
         "fields of Table 6.14.3-1; how it is computed is producer-specific and "
         "this NWDAF documents its own definition.",
         m_predict_sec, m_min_confidence);
+  }
+
+  // Which ranking rule decides. Default "RATE" = the original behaviour, so a
+  // deployment that does not set this is bit-for-bit unchanged.
+  m_dnperf_rule = env_str("SMF_NWDAF_DNPERF_RULE", "RATE");
+  for (auto& c : m_dnperf_rule) c = std::toupper(c);
+  if (m_dnperf_rule != "RATE" && m_dnperf_rule != "HEALTH") {
+    Logger::smf_app().warn(
+        "SMF_NWDAF_DNPERF_RULE='%s' is not RATE or HEALTH - falling back to "
+        "RATE",
+        m_dnperf_rule.c_str());
+    m_dnperf_rule = "RATE";
+  }
+  // Global serialization. 1 = one session may move per evaluation cycle, which
+  // is what stops a path-scoped signal from migrating every session at once.
+  // Set <= 0 to restore the previous all-at-once behaviour.
+  m_max_steers_per_cycle = env_int("SMF_NWDAF_STEER_MAX_PER_CYCLE", 1);
+  m_health_max_age_sec  = env_int("SMF_NWDAF_HEALTH_MAX_AGE_SEC", 30);
+  m_degraded_memory_sec = env_int("SMF_NWDAF_DEGRADED_MEMORY_SEC", 120);
+  m_steer_cooldown_sec  = env_int("SMF_NWDAF_STEER_COOLDOWN_SEC", 60);
+  if (m_dnperf_rule == "HEALTH") {
+    Logger::smf_app().info(
+        "NWDAF DN_PERFORMANCE ranking rule: HEALTH - steer only AWAY from a "
+        "path observed degraded; hold on healthy and on every UNKNOWN state. "
+        "PROJECT-SPECIFIC, not 3GPP. freshness=%ds degraded-memory=%ds "
+        "cooldown=%ds max-steers-per-cycle=%d",
+        m_health_max_age_sec, m_degraded_memory_sec, m_steer_cooldown_sec,
+        m_max_steers_per_cycle);
   }
 
   m_act_enabled = env_bool("SMF_NWDAF_ACT");
@@ -624,6 +656,34 @@ bool smf_nwdaf_consumer::request_dn_performance(
         // this consumer has no field to put them in.
       }
 
+      // PROJECT-SPECIFIC vendor extension. Deliberately read from OUTSIDE
+      // perfData: it is an AF_PACKET transmit-stall indicator, not one of
+      // Table 6.14.3-1's PerfData attributes, and folding it in would assert
+      // an equivalence with avgPacketLossRate that the measurements disprove.
+      if (entry.find("oaiPathHealthExt") != entry.end() &&
+          entry["oaiPathHealthExt"].is_object()) {
+        const auto& h = entry["oaiPathHealthExt"];
+        if (h.find("state") != h.end() && h["state"].is_string())
+          perf.health_state = h["state"].get<std::string>();
+        // A JSON null here is the producer saying "no observation", and it
+        // MUST stay unknown rather than becoming 0.0 - see the header.
+        if (h.find("sendtoFailurePerPacket") != h.end() &&
+            h["sendtoFailurePerPacket"].is_number()) {
+          perf.health_ratio     = h["sendtoFailurePerPacket"].get<double>();
+          perf.has_health_ratio = true;
+        }
+        if (h.find("txAttempts") != h.end() && h["txAttempts"].is_number())
+          perf.health_tx_attempts = h["txAttempts"].get<int64_t>();
+        if (h.find("observedAt") != h.end() && h["observedAt"].is_number()) {
+          perf.health_observed_at     = h["observedAt"].get<int64_t>();
+          perf.has_health_observed_at = true;
+        }
+        if (h.find("ageSec") != h.end() && h["ageSec"].is_number()) {
+          perf.health_age_sec = h["ageSec"].get<int64_t>();
+          perf.has_health_age = true;
+        }
+      }
+
       // TS 23.288 Table 6.14.3-2: Confidence exists ONLY in predictions. It is
       // carried on the DnPerfInfo (the (appId, S-NSSAI, DNN) grouping), not on
       // the per-path DnPerf, so it is read from the enclosing object.
@@ -742,6 +802,198 @@ bool smf_nwdaf_consumer::decide_from_dn_performance(
 }
 
 //------------------------------------------------------------------------------
+bool smf_nwdaf_consumer::health_is_fresh(const nwdaf_dn_perf_t& p) const {
+  // No age at all means the producer sent no extension, or an incomplete one.
+  // A sample whose age is unknown is never acted on.
+  if (!p.has_health_age) return false;
+  if (m_health_max_age_sec <= 0) return true;  // bound disabled
+
+  // `ageSec` is how old the sample was WHEN IT WAS FETCHED, and it never grows
+  // afterwards. If the NWDAF becomes unreachable the cached readings would
+  // therefore stay "fresh" forever and the consumer would keep steering on a
+  // picture of the network that stopped updating. Add the time elapsed since
+  // the fetch so a cache that stops being refreshed ages out on its own and
+  // everything falls back to UNKNOWN -> HOLD, which is the safe direction.
+  int64_t effective_age = p.health_age_sec;
+  if (m_last_perfs_at > 0) {
+    const int64_t since_fetch =
+        static_cast<int64_t>(std::time(nullptr)) - m_last_perfs_at;
+    if (since_fetch > 0) effective_age += since_fetch;
+  }
+  return effective_age <= (int64_t) m_health_max_age_sec;
+}
+
+//------------------------------------------------------------------------------
+void smf_nwdaf_consumer::update_degraded_memory(
+    const std::vector<nwdaf_dn_perf_t>& perfs) {
+  const int64_t now = static_cast<int64_t>(std::time(nullptr));
+
+  for (const auto& p : perfs) {
+    if (p.dnai.empty() || !health_is_fresh(p)) continue;
+
+    if (p.health_state == "OBSERVED_DEGRADED") {
+      m_dnai_degraded_at[p.dnai] = now;
+    } else if (p.health_state == "OBSERVED_HEALTHY") {
+      // Direct evidence of recovery clears the suspicion immediately. Only a
+      // POSITIVE observation may do this - an UNKNOWN_* state must not, because
+      // an idle path reads UNKNOWN whether it is healthy or broken (28.6).
+      if (m_dnai_degraded_at.erase(p.dnai) > 0) {
+        Logger::smf_app().info(
+            "NWDAF path health: DNAI '%s' observed healthy again - clearing "
+            "its recently-degraded mark",
+            p.dnai.c_str());
+      }
+    }
+  }
+
+  // Decay: forget a mark nothing has contradicted for long enough, so a path
+  // that has simply been left alone becomes a candidate again.
+  for (auto it = m_dnai_degraded_at.begin(); it != m_dnai_degraded_at.end();) {
+    if (m_degraded_memory_sec > 0 &&
+        (now - it->second) > (int64_t) m_degraded_memory_sec) {
+      Logger::smf_app().info(
+          "NWDAF path health: DNAI '%s' has not been seen degraded for %ds - "
+          "eligible again",
+          it->first.c_str(), m_degraded_memory_sec);
+      it = m_dnai_degraded_at.erase(it);
+    } else {
+      ++it;
+    }
+  }
+}
+
+//------------------------------------------------------------------------------
+// See the header for the rule and for why it is per-session.
+bool smf_nwdaf_consumer::decide_for_session(
+    const std::string& current_dnai, const std::set<std::string>& authorized,
+    std::string& dnai, std::string& reason) {
+  if (current_dnai.empty()) {
+    reason =
+        "the UPF has not confirmed a DNAI for this session yet - holding";
+    return false;
+  }
+
+  std::vector<nwdaf_dn_perf_t> perfs = {};
+  std::map<std::string, int64_t> degraded_at = {};
+  {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    perfs       = m_last_perfs;
+    degraded_at = m_dnai_degraded_at;
+  }
+  if (perfs.empty()) {
+    reason = "no DN_PERFORMANCE readings consumed yet - holding";
+    return false;
+  }
+
+  // ---- 1. the gate: what is the path this session is actually on doing? ----
+  const nwdaf_dn_perf_t* cur = nullptr;
+  for (const auto& p : perfs) {
+    if (p.dnai == current_dnai) cur = &p;
+  }
+  if (!cur) {
+    reason = "NWDAF reported nothing about the current DNAI '" + current_dnai +
+             "' - holding (absence is not evidence of a problem)";
+    return false;
+  }
+  if (!health_is_fresh(*cur)) {
+    reason = "path health for the current DNAI '" + current_dnai +
+             "' is absent or too old (max " +
+             std::to_string(m_health_max_age_sec) + "s) - holding";
+    return false;
+  }
+  if (cur->health_state != "OBSERVED_DEGRADED") {
+    // HEALTHY -> nothing to fix. UNKNOWN_* -> no information, and acting on no
+    // information is exactly what this rule exists to avoid.
+    reason = "current DNAI '" + current_dnai + "' is " +
+             (cur->health_state.empty() ? "UNKNOWN (no health reported)"
+                                        : cur->health_state) +
+             " - holding (only OBSERVED_DEGRADED justifies a steer)";
+    return false;
+  }
+
+  // ---- 2. candidates: authorized, not the current one, not known-bad -------
+  const nwdaf_dn_perf_t* best = nullptr;
+  int best_tier               = 99;   // 0 = OBSERVED_HEALTHY, 1 = UNKNOWN_*
+  int skipped_degraded        = 0;
+  int skipped_suspect         = 0;
+
+  for (const auto& p : perfs) {
+    if (p.dnai.empty() || p.dnai == current_dnai) continue;
+    if (authorized.find(p.dnai) == authorized.end()) continue;
+
+    const bool fresh = health_is_fresh(p);
+    if (fresh && p.health_state == "OBSERVED_DEGRADED") {
+      ++skipped_degraded;
+      continue;
+    }
+    // Recently degraded and not since observed healthy. THIS is the ping-pong
+    // guard: after a steer the abandoned path goes idle and reads
+    // UNKNOWN_NO_TRAFFIC, which without this memory looks like a fresh, clean
+    // candidate to steer straight back into.
+    if (degraded_at.find(p.dnai) != degraded_at.end()) {
+      ++skipped_suspect;
+      continue;
+    }
+
+    const int tier =
+        (fresh && p.health_state == "OBSERVED_HEALTHY") ? 0 : 1;
+
+    if (!best || tier < best_tier) {
+      best = &p; best_tier = tier; continue;
+    }
+    if (tier > best_tier) continue;
+
+    // Same tier: least loaded wins. A rate below the confidence floor is
+    // unusable, and a DNAI with no usable rate sorts LAST - unknown load is
+    // not zero load.
+    const bool p_usable =
+        p.has_avg_traffic_rate &&
+        !(p.has_confidence && p.confidence < m_min_confidence);
+    const bool b_usable =
+        best->has_avg_traffic_rate &&
+        !(best->has_confidence && best->confidence < m_min_confidence);
+    if (p_usable && !b_usable) {
+      best = &p;
+    } else if (p_usable && b_usable &&
+               p.avg_traffic_rate_bps < best->avg_traffic_rate_bps) {
+      best = &p;
+    }
+  }
+
+  const std::string cur_ratio =
+      cur->has_health_ratio ? std::to_string(cur->health_ratio) : "n/a";
+
+  if (!best) {
+    reason = "current DNAI '" + current_dnai +
+             "' is OBSERVED_DEGRADED (stall ratio " + cur_ratio +
+             ") but NO authorized alternative is usable (" +
+             std::to_string(skipped_degraded) + " also degraded, " +
+             std::to_string(skipped_suspect) +
+             " recently degraded) - holding on a known-bad path is better than "
+             "oscillating between two of them";
+    return false;
+  }
+
+  dnai = best->dnai;
+  reason = "current DNAI '" + current_dnai + "' is OBSERVED_DEGRADED (stall "
+           "ratio " + cur_ratio + " over " +
+           std::to_string(cur->health_tx_attempts) +
+           " tx packets) - steering to '" + best->dnai + "' (" +
+           (best_tier == 0 ? "OBSERVED_HEALTHY"
+                           : (best->health_state.empty()
+                                  ? "UNKNOWN"
+                                  : best->health_state)) +
+           ")";
+  if (best_tier != 0) {
+    reason +=
+        ". NOTE: the target is NOT known to be healthy - this is leaving a "
+        "known-bad path for an unknown one, which is deliberate; it is never "
+        "read as 'assume healthy'";
+  }
+  return true;
+}
+
+//------------------------------------------------------------------------------
 // One DN_PERFORMANCE poll. Deliberately a separate function so that the proven
 // NF_LOAD body of poll_loop() keeps its exact shape.
 void smf_nwdaf_consumer::poll_dn_performance(
@@ -766,6 +1018,45 @@ void smf_nwdaf_consumer::poll_dn_performance(
         p.has_confidence ? std::to_string(p.confidence).c_str()
                          : "not provided (statistics)");
   }
+
+  // Stash the readings so the per-session evaluation can consult them without
+  // re-issuing the analytics request once per PDU session, and update the
+  // decaying record of which DNAIs have been seen degraded.
+  {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_last_perfs    = perfs;
+    m_last_perfs_at = static_cast<int64_t>(std::time(nullptr));
+  }
+  update_degraded_memory(perfs);
+
+  for (const auto& p : perfs) {
+    if (p.health_state.empty()) continue;
+    // confidence is carried on this line too, purely so ONE grep shows the whole
+    // per-DNAI picture. It is NOT an input to the HEALTH rule - it describes the
+    // stability of the avgTrafficRate SERIES (TS 23.288 Table 6.14.3-2), and this
+    // rule does not rank on rate. It gates only the tie-break between two
+    // same-tier candidates, and under the RATE rule every decision.
+    Logger::smf_app().info(
+        "NWDAF path health (vendor extension, NOT 3GPP): dnai=%s state=%s "
+        "stallPerPacket=%s txPackets=%s ageSec=%s | rate=%s confidence=%s "
+        "(rate+confidence are NOT used by the HEALTH rule)",
+        p.dnai.c_str(), p.health_state.c_str(),
+        p.has_health_ratio ? std::to_string(p.health_ratio).c_str()
+                           : "null (no observation - NOT zero)",
+        p.health_tx_attempts >= 0 ? std::to_string(p.health_tx_attempts).c_str()
+                                  : "absent",
+        p.has_health_age ? std::to_string(p.health_age_sec).c_str() : "absent",
+        p.has_avg_traffic_rate
+            ? bitrate_to_string(p.avg_traffic_rate_bps).c_str()
+            : "not provided",
+        p.has_confidence ? std::to_string(p.confidence).c_str()
+                         : "absent (statistics carry none)");
+  }
+
+  // Under the HEALTH rule there is no single global preference to form: the
+  // decision depends on which path each SESSION is on, and is taken in
+  // evaluate_sessions() where that is known.
+  if (m_dnperf_rule == "HEALTH") return;
 
   std::string dnai   = {};
   std::string reason = {};
@@ -852,6 +1143,15 @@ void smf_nwdaf_consumer::evaluate_sessions() {
   std::vector<std::shared_ptr<oai::app::smf::smf_context>> contexts = {};
   smf_app_inst->get_smf_contexts(contexts);
 
+  // ONE budget for the whole cycle. poll_loop() calls this function exactly
+  // once per poll (both the DN_PERFORMANCE and the NF_LOAD branch do), so a
+  // counter local to this call is genuinely global to the steering engine -
+  // which is precisely what a per-session cooldown cannot be.
+  steer_cycle_state cycle = {};
+  cycle.max_per_cycle       = m_max_steers_per_cycle;
+  cycle.last_global_steer_at = m_last_global_steer_at;
+  int eligible = 0;
+
   for (const auto& sc : contexts) {
     if (!sc) continue;
     // pdu_session_id_t is uint8_t, not uint32_t - get_pdu_sessions() takes a
@@ -890,13 +1190,77 @@ void smf_nwdaf_consumer::evaluate_sessions() {
       const std::set<std::string>& allowed = by_precedence.begin()->second;
 
       std::string reason = {};
-      const std::string chosen = choose_authorized_dnai(allowed, reason);
+      std::string chosen = {};
+      if (m_dnperf_rule == "HEALTH") {
+        // Read the CONFIRMED DNAI - what the UPF has acknowledged - not the
+        // intent. A steer whose PFCP update failed would otherwise look like a
+        // success forever (PROJECT-HISTORY 19.7 item 1).
+        std::string confirmed = {};
+        if (sp->get_session_handler() &&
+            sp->get_session_handler()->get_session_graph()) {
+          confirmed = sp->get_session_handler()
+                          ->get_session_graph()
+                          ->get_n6_confirmed_dnai();
+        }
+        std::string target = {};
+        if (decide_for_session(confirmed, allowed, target, reason)) {
+          // COOLDOWN. m_last_trigger only suppresses a repeat of the SAME
+          // target, which does nothing against A->B->A oscillation. This bounds
+          // how often a session may be moved at all.
+          const int64_t now = static_cast<int64_t>(std::time(nullptr));
+          const uint64_t scid = sp->policy_ptr ? sp->policy_ptr->id : 0;
+          auto it = m_last_steer_at.find(scid);
+          if (scid != 0 && it != m_last_steer_at.end() &&
+              m_steer_cooldown_sec > 0 &&
+              (now - it->second) < (int64_t) m_steer_cooldown_sec) {
+            reason = "steer to '" + target + "' suppressed: this session was "
+                     "steered " + std::to_string(now - it->second) +
+                     "s ago and the cooldown is " +
+                     std::to_string(m_steer_cooldown_sec) + "s";
+          } else {
+            chosen = target;
+            if (scid != 0) m_last_steer_at[scid] = now;
+          }
+        }
+      } else {
+        chosen = choose_authorized_dnai(allowed, reason);
+      }
 
       std::string list;
       for (const auto& d : allowed) {
         if (!list.empty()) list += ", ";
         list += d;
       }
+      // GLOBAL SERIALIZATION. A session that is otherwise ready to move is
+      // held here if the cycle's budget is spent, or if the target's health has
+      // not been re-observed since the previous steer. Applied AFTER the PCF
+      // authorization check, so it can never widen what policy allows - it only
+      // ever withholds a move.
+      if (!chosen.empty()) {
+        ++eligible;
+        bool target_has_health          = false;
+        int64_t target_health_observed  = 0;
+        {
+          std::lock_guard<std::mutex> lock(m_mutex);
+          for (const auto& p : m_last_perfs) {
+            if (p.dnai == chosen && p.has_health_observed_at) {
+              target_has_health         = true;
+              target_health_observed    = p.health_observed_at;
+              break;
+            }
+          }
+        }
+        std::string hold = {};
+        if (!serialization_allows_steer(cycle, target_has_health,
+                                        target_health_observed, hold)) {
+          Logger::smf_app().info(
+              "Steering cycle: holding PDU session %d (target '%s') - %s",
+              static_cast<int>(entry.first), chosen.c_str(), hold.c_str());
+          chosen.clear();
+          reason = hold;
+        }
+      }
+
       if (chosen.empty()) {
         Logger::smf_app().info(
             "NWDAF per-session decision: PDU session %d (precedence %u, "
@@ -911,26 +1275,44 @@ void smf_nwdaf_consumer::evaluate_sessions() {
             chosen.c_str(), reason.c_str());
         // The decision used to end here - computed, authorized, and discarded.
         // That was PROJECT-HISTORY §16.3's "the loop is open".
-        maybe_trigger_steering(sp, chosen, static_cast<int>(entry.first));
+        if (maybe_trigger_steering(sp, chosen, static_cast<int>(entry.first))) {
+          const int64_t now = static_cast<int64_t>(std::time(nullptr));
+          ++cycle.steers_this_cycle;
+          cycle.last_global_steer_at = now;
+          m_last_global_steer_at     = now;
+          Logger::smf_app().info(
+              "Steering cycle: steered PDU session %d to '%s' (%d/%d this "
+              "cycle) - remaining sessions wait for the next cycle and a "
+              "health observation that postdates this move",
+              static_cast<int>(entry.first), chosen.c_str(),
+              cycle.steers_this_cycle, cycle.max_per_cycle);
+        }
       }
     }
+  }
+
+  // Silent when nothing was eligible, so an idle deployment logs nothing new.
+  if (eligible > 0) {
+    Logger::smf_app().info(
+        "Steering cycle: %d eligible session(s), %d steered (limit %d/cycle)",
+        eligible, cycle.steers_this_cycle, cycle.max_per_cycle);
   }
 }
 
 //------------------------------------------------------------------------------
 // See the header for why this only posts an ITTI message and never touches the
 // session graph itself.
-void smf_nwdaf_consumer::maybe_trigger_steering(
+bool smf_nwdaf_consumer::maybe_trigger_steering(
     const std::shared_ptr<oai::app::smf::smf_pdu_session>& sp,
     const std::string& chosen, int pdu_session_id) {
-  if (!m_act_enabled) return;  // default: decide and log, never act
-  if (!sp || chosen.empty()) return;
-  if (!smf_app_inst || !itti_inst) return;
+  if (!m_act_enabled) return false;  // default: decide and log, never act
+  if (!sp || chosen.empty()) return false;
+  if (!smf_app_inst || !itti_inst) return false;
 
   if (!sp->policy_ptr) {
     // Cannot happen on this path (the caller already required it), but the
     // scid is read from it below, so never dereference on trust.
-    return;
+    return false;
   }
   if (!sp->get_session_handler() ||
       !sp->get_session_handler()->get_session_graph()) {
@@ -938,7 +1320,7 @@ void smf_nwdaf_consumer::maybe_trigger_steering(
         "SMF-initiated steering: PDU session %d has no session graph - not "
         "triggering",
         pdu_session_id);
-    return;
+    return false;
   }
 
   // DAMPING 1: the session is already where the analytics want it. This is the
@@ -955,7 +1337,7 @@ void smf_nwdaf_consumer::maybe_trigger_steering(
     // Reached the target: drop any damping state for this session so the map
     // does not accumulate an entry per SCID for the lifetime of the process.
     if (sp->policy_ptr) m_last_trigger.erase(sp->policy_ptr->id);
-    return;
+    return false;
   }
 
   // The SM Context ID, as stored when the policy association was created
@@ -966,7 +1348,7 @@ void smf_nwdaf_consumer::maybe_trigger_steering(
         "SMF-initiated steering: PDU session %d has no SM Context ID - not "
         "triggering",
         pdu_session_id);
-    return;
+    return false;
   }
 
   // DAMPING 2: do not re-issue the same request while the previous one may
@@ -983,7 +1365,7 @@ void smf_nwdaf_consumer::maybe_trigger_steering(
         "was sent %lds ago - waiting for it to take effect",
         chosen.c_str(), (unsigned long) scid,
         (long) (now - it->second.second));
-    return;
+    return false;
   }
   m_last_trigger[scid] = std::make_pair(chosen, now);
 
@@ -1015,7 +1397,9 @@ void smf_nwdaf_consumer::maybe_trigger_steering(
         "SMF-initiated steering: could not send ITTI message %s to TASK_SMF_APP",
         itti_msg->get_msg_name());
     m_last_trigger.erase(scid);
+    return false;
   }
+  return true;
 }
 
 //------------------------------------------------------------------------------

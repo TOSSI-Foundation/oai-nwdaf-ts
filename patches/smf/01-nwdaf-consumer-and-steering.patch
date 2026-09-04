@@ -7,8 +7,18 @@
 # Adds the NWDAF analytics consumer, per-session PCF-authorized DNAI selection,
 # SMF-initiated UP path change, and the PFCP FAR+PDR re-bind that moves a live
 # session between N6 network instances.
-# NOTE: also copy smf_nwdaf_consumer.{cpp,hpp} from files/ - they are NEW files
-# and are not part of this diff.
+# NOTE: three NEW files are NOT part of this diff and must be copied in
+# alongside it, from this directory:
+#   smf_nwdaf_consumer.cpp
+#   smf_nwdaf_consumer.hpp
+#   smf_nwdaf_steer_serialization.hpp
+# and add smf_nwdaf_consumer.cpp to SMF_SRC in src/smf_app/CMakeLists.txt.
+#
+# Those three carry the HEALTH ranking rule (steer only away from a path
+# observed degraded) and the global one-steer-per-cycle serialization. The
+# behaviour they select is opt-in: SMF_NWDAF_DNPERF_RULE defaults to RATE, so
+# applying this patch alone reproduces the original argmax(avgTrafficRate)
+# behaviour until the operator sets it to HEALTH.
 #
 diff --git a/src/api-server/smf-http2-server.cpp b/src/api-server/smf-http2-server.cpp
 index 20f123d..e11395a 100644

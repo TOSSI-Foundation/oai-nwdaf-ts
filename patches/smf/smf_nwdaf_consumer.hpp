@@ -94,6 +94,7 @@ struct nwdaf_nf_load_t {
   int32_t nf_load_level_peak    = -1;
   int32_t confidence            = -1;
   bool has_confidence           = false;
+
 };
 
 /*
@@ -129,6 +130,41 @@ struct nwdaf_dn_perf_t {
   // letting an absent value become 0.
   int32_t confidence            = -1;
   bool has_confidence           = false;
+  /*
+   * PROJECT-SPECIFIC vendor extension `oaiPathHealthExt`, NOT a 3GPP field.
+   *
+   * Table 6.14.3-1's PerfData carries avgPacketLossRate / avePacketDelay /
+   * maxPacketDelay. This is NONE of those: it is an AF_PACKET transmit-stall
+   * indicator derived from VPP's `tx sendto temporary failure` counter,
+   * normalised per transmitted packet. It is not packet loss - VPP `drops`,
+   * Linux `tx_dropped` and `tx_errors` all read exactly zero under every
+   * impairment measured. It is kept OUTSIDE the 3GPP fields for exactly that
+   * reason, and is read here only by the HEALTH ranking rule.
+   *
+   * health_state is copied VERBATIM and never whitelisted, so a producer-side
+   * state addition needs no change here. Known values:
+   *   OBSERVED_HEALTHY  OBSERVED_DEGRADED
+   *   UNKNOWN_NO_TRAFFIC  UNKNOWN_INSUFFICIENT_SAMPLES
+   *   UNKNOWN_NO_SAMPLE   UNKNOWN_STALE
+   *
+   * An empty health_state means the producer sent no extension at all - which
+   * is UNKNOWN, never healthy.
+   *
+   * has_health_ratio is false when the producer sent JSON null. The ratio MUST
+   * NOT be read as 0 in that case: an idle path makes no transmit attempt, so
+   * it cannot produce a failure, and an idle IMPAIRED path is byte-for-byte
+   * identical to an idle healthy one (measured, PROJECT-HISTORY 28.6).
+   */
+  std::string health_state      = {};
+  double health_ratio           = -1.0;
+  bool has_health_ratio         = false;
+  int64_t health_tx_attempts    = -1;
+  int64_t health_age_sec        = -1;
+  bool has_health_age           = false;
+  // Absolute time the sample was taken. The serialization gate compares this
+  // against the last steer, which an age alone cannot express.
+  int64_t health_observed_at    = 0;
+  bool has_health_observed_at   = false;
 };
 
 class smf_nwdaf_consumer {
@@ -279,6 +315,70 @@ class smf_nwdaf_consumer {
       std::string& reason);
 
   /*
+   * The HEALTH ranking rule (SMF_NWDAF_DNPERF_RULE=HEALTH).
+   *
+   * WHY THIS IS PER-SESSION AND decide_from_dn_performance() IS NOT.
+   * The RATE rule ranks paths globally and compares against the SMF's own
+   * previous preference. This rule asks a different question - "is the path
+   * THIS session is on actually degraded?" - and "the path this session is on"
+   * is a property of the session (get_n6_confirmed_dnai()), not of the SMF.
+   * With two DNAIs a global answer happens to come out right; with three it
+   * does not, so the question is asked where the answer is actually known.
+   *
+   * THE RULE:
+   *   current OBSERVED_DEGRADED -> steer to the best authorized alternative
+   *   current OBSERVED_HEALTHY  -> HOLD
+   *   current UNKNOWN_*         -> HOLD   (unknown is NOT bad)
+   *   current health absent     -> HOLD
+   *
+   * Leaving a KNOWN-BAD path for an unknown one is defensible. Leaving an
+   * unknown path is not - that would be acting on no information at all.
+   *
+   * Candidate selection among authorized DNAIs other than the current one:
+   *   1. exclude OBSERVED_DEGRADED
+   *   2. exclude "suspect" - degraded within m_degraded_memory_sec and not
+   *      seen OBSERVED_HEALTHY since. This is what stops the A->B->A ping-pong
+   *      that a naive health rule would produce: steer off a degraded path and
+   *      it goes idle, whereupon it reads UNKNOWN_NO_TRAFFIC - indistinguishable
+   *      from healthy - and a rule without memory would steer straight back.
+   *   3. prefer OBSERVED_HEALTHY over UNKNOWN_*
+   *   4. within a tier, lowest avgTrafficRate (least loaded) wins. The
+   *      confidence floor still applies HERE, because this is the only place a
+   *      rate is used. A DNAI with no usable rate sorts LAST in its tier:
+   *      unknown load is not zero load.
+   *
+   * @param [const std::string&] current_dnai: the UPF-CONFIRMED DNAI of this
+   *        session - intent is not truth, see PROJECT-HISTORY 19.7
+   * @param [const std::set<std::string>&] authorized: PCF-authorized DNAIs
+   * @param [std::string&] dnai: the DNAI to steer to, set only when true
+   * @param [std::string&] reason: human-readable explanation, always set
+   * @return true if a steer is warranted
+   */
+  bool decide_for_session(
+      const std::string& current_dnai,
+      const std::set<std::string>& authorized, std::string& dnai,
+      std::string& reason);
+
+  /*
+   * Record which DNAIs were seen OBSERVED_DEGRADED, and forget it again.
+   *
+   * An OBSERVED_HEALTHY reading CLEARS the entry immediately - that is direct
+   * evidence of recovery. An UNKNOWN_* reading never clears it, which is the
+   * whole point: an idle path reads UNKNOWN whether it is healthy or broken.
+   * Entries also expire after m_degraded_memory_sec, so a path that has been
+   * left alone long enough becomes a candidate again. That is the decay.
+   */
+  void update_degraded_memory(const std::vector<nwdaf_dn_perf_t>& perfs);
+
+  /*
+   * True if this reading's path health is recent enough to act on. The
+   * producer already suppresses samples older than its own bound and reports
+   * UNKNOWN_STALE; this is the consumer applying its own, independent of what
+   * the producer was configured with. A sample of unknown age is never used.
+   */
+  bool health_is_fresh(const nwdaf_dn_perf_t& p) const;
+
+  /*
    * One DN_PERFORMANCE poll iteration. Kept separate from poll_loop()'s
    * NF_LOAD body so that the proven NF_LOAD path is not restructured.
    */
@@ -311,8 +411,14 @@ class smf_nwdaf_consumer {
    * @param [smf_pdu_session] sp: the session to steer
    * @param [std::string] chosen: the PCF-authorized DNAI to apply
    * @param [int] pdu_session_id: for logging only
+   * @return true only if a steering request was actually SENT. False for every
+   *         no-op path (actuation disabled, already on the target DNAI, still
+   *         inside the in-flight quiet period, ITTI send failed). The caller
+   *         uses this to decide whether the cycle's steering budget was spent -
+   *         counting a no-op would let one declined session block a real move
+   *         for a whole cycle.
    */
-  void maybe_trigger_steering(
+  bool maybe_trigger_steering(
       const std::shared_ptr<oai::app::smf::smf_pdu_session>& sp,
       const std::string& chosen, int pdu_session_id);
 
@@ -363,6 +469,51 @@ class smf_nwdaf_consumer {
   // re-issued on the next tick before the first one had taken effect.
   // scid -> (dnai last asked for, monotonic seconds when it was asked).
   std::map<uint64_t, std::pair<std::string, int64_t>> m_last_trigger = {};
+
+  // Which ranking rule decides. "RATE" (default) is the original, unchanged
+  // argmax(avgTrafficRate) behaviour; "HEALTH" gates on the per-DNAI path
+  // health extension. Default RATE so deploying this build changes NOTHING
+  // until the operator opts in, and rollback is one environment variable with
+  // no rebuild.
+  std::string m_dnperf_rule = "RATE";
+  // Consumer-side freshness bound on the health extension, independent of the
+  // producer's own. Anything older is treated as UNKNOWN.
+  int m_health_max_age_sec = 30;
+  // How long a DNAI stays "suspect" after being seen OBSERVED_DEGRADED, unless
+  // an OBSERVED_HEALTHY reading clears it sooner. Stops the ping-pong.
+  int m_degraded_memory_sec = 120;
+  // Minimum interval between two steers of the SAME session under the HEALTH
+  // rule. Broader than m_last_trigger, which only suppresses a repeat of the
+  // SAME target and so does nothing against A->B->A oscillation.
+  int m_steer_cooldown_sec = 60;
+
+  // GLOBAL STEERING SERIALIZATION (PROJECT-HISTORY 31.12, Improvement 6b).
+  // At most m_max_steers_per_cycle sessions may move per evaluate_sessions()
+  // call, and the poll loop calls that exactly once per poll - so the limit is
+  // global to the steering engine, not per session. The existing per-session
+  // cooldown and in-flight quiet period are UNCHANGED and still apply on top.
+  int m_max_steers_per_cycle = 1;
+  // Unix seconds of the last steer issued for ANY session. The next cycle will
+  // not move another session until it has a health observation taken after
+  // this instant - see smf_nwdaf_steer_serialization.hpp.
+  int64_t m_last_global_steer_at = 0;
+
+  // dnai -> unix seconds when it was last seen OBSERVED_DEGRADED.
+  std::map<std::string, int64_t> m_dnai_degraded_at = {};
+  // scid -> unix seconds of the last steer issued for that session.
+  std::map<uint64_t, int64_t> m_last_steer_at = {};
+  // The most recent parsed readings, so the per-session evaluation can consult
+  // them without re-issuing the analytics request once per PDU session.
+  std::vector<nwdaf_dn_perf_t> m_last_perfs = {};
+  // When those readings were FETCHED. Without this the consumer keeps steering
+  // on the last successful poll forever whenever the NWDAF becomes unreachable:
+  // health_is_fresh() tests `ageSec`, which is a snapshot taken at fetch time
+  // and never grows, so a stale cache passes the freshness test indefinitely.
+  // Observed live - the analytics endpoint slowed to 3-4.5 s as `upf_metrics`
+  // grew past 41 000 documents, the SMF's requests timed out ("NWDAF returned
+  // HTTP 0"), and decisions carried on against readings that predated an
+  // impairment applied minutes earlier.
+  int64_t m_last_perfs_at = 0;
 };
 
 }  // namespace oai::smf

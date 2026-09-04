@@ -46,6 +46,30 @@ type SbiConfig struct {
 		DbName            string `envconfig:"MONGODB_DATABASE_NAME"`
 		CollectionAmfName string `envconfig:"MONGODB_COLLECTION_NAME_AMF"`
 		CollectionSmfName string `envconfig:"MONGODB_COLLECTION_NAME_SMF"`
+		// QosMonRetain - how many of the most recent PFCP usage reports to keep
+		// in each SUPI's qosmonlist. 0 or negative disables the bound and
+		// restores the previous unbounded append.
+		//
+		// WHY THIS EXISTS. qosmonlist grows by one entry per usage report per
+		// PDU session - about one every 5 s here - and nothing ever removed
+		// them. Measured live after 39 h: 17 954 entries in a single ~10 MB
+		// document, of which the 300 s analytics window used 60. The engine
+		// selects documents with an $elemMatch on the timestamp but then walks
+		// the WHOLE array in application code (see applyDefaultRecentWindow in
+		// the engine's utils.go, which already records 6.5 s spent scanning
+		// 248k entries), so the cost is driven by total array length rather
+		// than by how much of it is in the window. The result was
+		// nnwdaf-analyticsinfo latency of 3-4.5 s and SMF requests timing out
+		// with "NWDAF returned HTTP 0".
+		//
+		// SIZING. At the measured ~573 bytes per entry and ~1 entry / 5 s:
+		//   default window 300 s  ->    60 entries
+		//   1000 entries          ->  ~83 min of history, ~570 KB per document
+		// 1000 therefore leaves roughly 16x headroom over the default window,
+		// so a consumer asking for an explicit window well beyond 300 s still
+		// finds its data, while bounding a document that had reached 10 MB.
+		// Raise it if you routinely query windows longer than an hour.
+		QosMonRetain int `envconfig:"MONGODB_QOSMON_RETAIN" default:"1000"`
 	}
 	Server struct {
 		NotifUri string `envconfig:"EVENT_NOTIFY_URI"`

@@ -290,8 +290,33 @@ func getUpdateQOS_MON(notif smf_client.EventNotification) (bson.D, error) {
 			{"lastmodified", timeStamp},
 		}},
 		{"$push", bson.M{
-			"qosmonlist": &push,
+			"qosmonlist": qosMonPushValue(&push, config.Database.QosMonRetain),
 		}},
 	}
 	return update, nil
+}
+
+// ----------------------------------------------------------------------------------------------------------------
+// qosMonPushValue - build the $push value for qosmonlist, bounded to the most
+// recent `retain` entries.
+//
+// $slice with a NEGATIVE bound keeps the LAST n elements after the push. Entries
+// are appended in arrival order, so the last n are the newest and no $sort is
+// needed - sorting the array on every single write would be the expensive part,
+// and the ordering is already correct by construction.
+//
+// The bound is applied by MongoDB inside the same atomic update as the push, so
+// there is no read-modify-write, no extra round trip, and no window during which
+// the array is over-length.
+//
+// retain <= 0 returns the bare value, which is exactly the previous unbounded
+// behaviour - that is the rollback path.
+func qosMonPushValue(push interface{}, retain int) interface{} {
+	if retain <= 0 {
+		return push
+	}
+	return bson.M{
+		"$each":  bson.A{push},
+		"$slice": -retain,
+	}
 }
