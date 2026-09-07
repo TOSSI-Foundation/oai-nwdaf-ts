@@ -91,7 +91,8 @@ echo "=== 6. scripts are executable and launchable ==="
 # "Permission denied" into /dev/null. That is exactly how the telemetry
 # collector silently never started, and with no collector NOTHING EVER STEERS.
 bad=0
-for f in $(find "$R/scripts" -name '*.sh'); do
+# scripts/lib/*.sh are SOURCED, not executed - they are correct at 0644.
+for f in $(find "$R/scripts" -name '*.sh' -not -path '*/lib/*'); do
   [ -x "$f" ] || { bad=1; echo "        not executable: ${f#$R/}"; }
 done
 # Anything the deploy scripts exec directly (rather than via 'python3 x.py')
