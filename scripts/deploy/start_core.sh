@@ -11,6 +11,11 @@
 set -u
 FED=${FED:-$HOME/oai-cn5g-fed/docker-compose}
 
+COMPOSE=${COMPOSE:-docker-compose-basic-vpp-pcf-steering.yaml}
+SMF_IMAGE=${SMF_IMAGE:-oai-smf:serialize}
+RULE=${SMF_NWDAF_DNPERF_RULE:-}
+HERE=$(cd "$(dirname "$0")/../.." && pwd)
+
 # ── preflight ────────────────────────────────────────────────────────────────
 # Every check here failed silently or confusingly for someone once. A missing
 # docker-compose used to surface as "sudo: docker-compose: command not found"
@@ -44,10 +49,6 @@ for i in oai-nrf:nwdaf-disc-amfalias oai-pcf:heartbeat "$SMF_IMAGE"; do
   sudo docker image inspect "$i" >/dev/null 2>&1 || { echo "FAIL: missing image $i"; miss=1; }
 done
 [ "$miss" = 0 ] || { echo "      run ./scripts/build.sh nfs   (a full C++ build, hours)"; exit 1; }
-COMPOSE=${COMPOSE:-docker-compose-basic-vpp-pcf-steering.yaml}
-SMF_IMAGE=${SMF_IMAGE:-oai-smf:serialize}
-RULE=${SMF_NWDAF_DNPERF_RULE:-}
-HERE=$(cd "$(dirname "$0")/../.." && pwd)
 
 while [ $# -gt 0 ]; do case "$1" in --rule) RULE=$2; shift 2;; *) shift;; esac; done
 
