@@ -261,6 +261,8 @@ are likely to meet them.
 
 | Symptom | Cause | Fix |
 |---|---|---|
+| `dial tcp [2600:9000:...]:443: connect: network is unreachable` while compose pulls | DNS returned a AAAA record for Docker Hub's CDN and the host has no working IPv6 route | retry first (pulls resume); if it persists: `sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1 && sudo systemctl restart docker` |
+| `pull access denied for oai-smf` (or any `oai-*`) | compose names a locally-built tag that was never built — it is not on any registry | `./scripts/build.sh nfs`, and check `git pull` actually brought the compose file you expect |
 | `sudo: docker-compose: command not found` | neither compose generation is installed — `docker.io` does not include one | `sudo apt install -y docker-compose-plugin` |
 | `network demo-oai-public-net not found` during `make nwdaf` | the core never came up, so `make core` must have failed | scroll back to `make core`; fix that, then re-run `make nwdaf` |
 | `No such container: vpp-upf` during `make ues` | same — the core is not running | `make core` first; `make ues` now refuses to start without it |
