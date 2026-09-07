@@ -129,7 +129,7 @@ services:
                 ipv4_address: 192.168.70.133
     oai-pcf:
         container_name: "oai-pcf"
-        image: oai-pcf:route2
+        image: oai-pcf:heartbeat
         expose:
             - 80/tcp
             - 8080/tcp

@@ -16,9 +16,13 @@ PROTO   ?= udp
 IFACE   ?= n6-3
 RATE    ?= 40mbit
 
-.PHONY: help up core nwdaf ues load steer unsteer status verify clean logs
+.PHONY: help build up core nwdaf ues load steer unsteer status verify clean logs test test-rate test-health
 
 help:
+	@echo "First time on this machine:"
+	@echo "  make build           build every image this deployment needs"
+	@echo "  make build WHAT=nwdaf   ... only the NWDAF Go services (~2 min)"
+	@echo
 	@echo "Bring-up (in order):"
 	@echo "  make core            5G core + the steering SMF (asks RATE or HEALTH)"
 	@echo "  make core RULE=RATE  ... or choose non-interactively"
@@ -27,6 +31,8 @@ help:
 	@echo "  make up              all three, end to end"
 	@echo
 	@echo "Testing:"
+	@echo "  make test-health     automated HEALTH steering test, PASS/FAIL"
+	@echo "  make test-rate       automated RATE steering test, PASS/FAIL"
 	@echo "  make load            traffic on every UE         [MBPS=60 SECS=1800 PROTO=udp]"
 	@echo "  make steer           degrade a path to trigger a steer  [IFACE=n6-3 RATE=40mbit]"
 	@echo "  make unsteer         remove the impairment       <- ALWAYS run this"
@@ -38,6 +44,12 @@ help:
 	@echo "  make clean           stop and remove everything (keeps MongoDB data)"
 	@echo
 	@echo "Full walkthrough: docs/QUICKSTART.md   Multi-UE: docs/MULTI-UE-STEERING.md"
+
+WHAT ?= all
+
+# Images first - every bring-up target below assumes the tags already exist.
+build:
+	@./scripts/build.sh $(WHAT)
 
 up: core nwdaf ues
 	@echo "Stack is up. Next: make load, then make steer"
@@ -72,7 +84,8 @@ status:
 	        /IPv4 address: 12\./{if(!ip[n])ip[n]=$$3} \
 	        /Network Instance: internet/{if(!w[n]){w[n]=$$3; print "  SEID "n"  "ip[n]"  "$$3}}'
 	@sudo docker logs oai-smf --since 20s 2>&1 | grep -oP 'dnai=\S+ state=\S+' | sort -u | sed 's/^/  /' || true
-	@echo -n "  rule: "; sudo docker logs oai-smf 2>&1 | grep -q 'ranking rule: HEALTH' && echo HEALTH || echo RATE
+	@echo -n "  rule: "; sudo docker logs oai-smf 2>&1 | awk '/ranking rule: HEALTH/{h=1} /NWDAF consumer starting/{last=h; h=0} END{print (last?"HEALTH":"RATE")}'
+
 
 logs:
 	@sudo docker logs -f oai-smf 2>&1 | grep --line-buffered -E \
@@ -80,6 +93,17 @@ logs:
 
 verify:
 	@./scripts/verify_release.sh
+
+# The two steering rules, each with a PASS/FAIL verdict verified against the
+# UPF's forwarding state rather than against a log line. test-health impairs a
+# path and ALWAYS removes the qdisc again, including on Ctrl-C.
+test-health:
+	@./scripts/test-health.sh
+
+test-rate:
+	@./scripts/test-rate.sh
+
+test: test-health test-rate
 
 # Removes containers and networks but NOT volumes: the NWDAF MongoDB is on an
 # anonymous volume, and 'docker-compose down -v' would destroy every metric ever
@@ -91,7 +115,7 @@ clean:
 	@sudo docker rm -f oai-nwdaf-sbi $$(sudo docker ps -aq --filter 'name=gnbsim-vpp') 2>/dev/null || true
 	@sudo docker rm -f oai-nwdaf-engine oai-nwdaf-nbi-analytics oai-nwdaf-nbi-events \
 	   oai-nwdaf-engine-traffic-steering oai-nwdaf-database oai-smf 2>/dev/null || true
-	@cd $${FED:-/home/ubuntu/oai-cn5g-fed/docker-compose} && \
+	@cd $${FED:-$$HOME/oai-cn5g-fed/docker-compose} && \
 	   sudo docker-compose -f docker-compose-basic-vpp-pcf-steering.yaml down 2>&1 | tail -3 || true
 	@for n in demo-oai-public-net oai-public-access oai-public-core-pri oai-public-core-sec oai-nwdaf-net; do \
 	   sudo docker network rm $$n >/dev/null 2>&1 || true; done

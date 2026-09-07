@@ -3,9 +3,16 @@
 # Recreate oai-smf on a given image, reproducing the running container's spec
 # exactly (captured from `docker inspect oai-smf` before the swap).
 #   sudo ./recreate_smf.sh oai-smf:dnperf [EXTRA -e ARGS...]
+#
+# Env:
+#   FED   path to oai-cn5g-fed/docker-compose  (default $HOME/oai-cn5g-fed/docker-compose)
 set -euo pipefail
 IMAGE=${1:?usage: recreate_smf.sh <image> [extra -e docker args...]}
 shift || true
+FED=${FED:-$HOME/oai-cn5g-fed/docker-compose}
+CONF=${SMF_CONFIG:-$FED/conf/ulcl_config.yaml}
+[ -f "$CONF" ] || { echo "SMF config not found: $CONF" >&2
+                    echo "run ./scripts/build.sh fed first, or set FED/SMF_CONFIG" >&2; exit 1; }
 
 docker rm -f oai-smf >/dev/null 2>&1 || true
 docker create --name oai-smf \
@@ -18,7 +25,7 @@ docker create --name oai-smf \
   -e SMF_NWDAF_DNAI_NORMAL=internet-primary \
   -e SMF_NWDAF_DNAI_CONGESTED=internet-secondary \
   "$@" \
-  -v /home/ubuntu/oai-cn5g-fed/docker-compose/conf/ulcl_config.yaml:/openair-smf/etc/config.yaml \
+  -v "$CONF":/openair-smf/etc/config.yaml \
   `# REQUIRED. ulcl_config.yaml addresses the UPF by FQDN and the UPF's N4` \
   `# address (192.168.70.201, what it registers in the NRF) is NOT its docker` \
   `# IP, so Docker's embedded DNS cannot resolve it. Without this the PFCP` \

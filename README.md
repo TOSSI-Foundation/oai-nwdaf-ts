@@ -58,6 +58,20 @@ The path-health signal is an **AF_PACKET transmit-stall indicator specific to th
 VPP-on-veth lab**. It is **not** packet loss and **not** a 3GPP metric. See
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
+## Quick start
+
+```bash
+./scripts/build.sh          # build all 9 images (NWDAF ~2 min; the C++ NFs are hours)
+make up                     # core + NWDAF + UEs, end to end
+make load                   # traffic on every UE
+make test-health            # automated HEALTH steering test  -> PASS/FAIL
+make test-rate              # automated RATE steering test    -> PASS/FAIL
+make clean                  # tear down (keeps the MongoDB volume)
+```
+
+Nothing is published to a registry, so `build.sh` is not optional — see
+[docs/QUICKSTART.md](docs/QUICKSTART.md) for prerequisites and the image table.
+
 ## Layout
 
 ```
@@ -65,9 +79,17 @@ nwdaf/      NWDAF services (engine, nbi-analytics, nbi-events, sbi)
 patches/    changes to upstream OAI NFs, pinned to base commits
 compose/    deployment topology
 configs/    NF config + PCF steering policies
-scripts/    telemetry collector, DN route synchronizer, deploy helpers
-docs/       architecture, quickstart, testing, full engineering log
+scripts/    build.sh, deploy helpers, telemetry collector, DN route sync, tests
+docs/       architecture, networks, quickstart, testing
 ```
+
+| Doc | What is in it |
+|---|---|
+| [QUICKSTART.md](docs/QUICKSTART.md) | prerequisites, building the images, bring-up, first test |
+| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | the control loop, the two data sources, what the metric is not |
+| [NETWORKS.md](docs/NETWORKS.md) | every subnet, address and port, and which N6 veth is which DNAI |
+| [MULTI-UE-STEERING.md](docs/MULTI-UE-STEERING.md) | the HEALTH rule, serialization, full configuration reference |
+| [TESTING.md](docs/TESTING.md) | controlled path impairment and how to read the counters |
 
 ## Upstream
 

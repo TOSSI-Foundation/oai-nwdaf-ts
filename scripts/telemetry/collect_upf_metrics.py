@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 # SPDX-License-Identifier: LicenseRef-CSSL-1.0
 """
 Host-side poller for UPF resource metrics (CPU/memory), feeding the NF_LOAD

@@ -6,10 +6,11 @@
 #   ./start_core.sh --rule RATE
 #
 # Env:
-#   FED         path to oai-cn5g-fed/docker-compose   (default /home/ubuntu/oai-cn5g-fed/docker-compose)
+#   FED         path to oai-cn5g-fed/docker-compose   (default $HOME/oai-cn5g-fed/docker-compose)
 #   SMF_IMAGE   SMF image to run                      (default oai-smf:serialize)
 set -u
-FED=${FED:-/home/ubuntu/oai-cn5g-fed/docker-compose}
+FED=${FED:-$HOME/oai-cn5g-fed/docker-compose}
+[ -d "$FED" ] || { echo "oai-cn5g-fed not found at $FED - run ./scripts/build.sh fed"; exit 1; }
 COMPOSE=${COMPOSE:-docker-compose-basic-vpp-pcf-steering.yaml}
 SMF_IMAGE=${SMF_IMAGE:-oai-smf:serialize}
 RULE=${SMF_NWDAF_DNPERF_RULE:-}
@@ -68,7 +69,7 @@ echo "──── 2/2  SMF: $SMF_IMAGE, rule=$RULE ────"
 # The SBI is removed first and NOT restarted here: it must come up after the SMF
 # is stable and before any UE attaches, which start_ues / demo_reset_multi.sh do.
 sudo docker rm -f oai-nwdaf-sbi >/dev/null 2>&1
-sudo bash "$HERE/scripts/deploy/recreate_smf.sh" "$SMF_IMAGE" \
+sudo FED="$FED" bash "$HERE/scripts/deploy/recreate_smf.sh" "$SMF_IMAGE" \
   -e SMF_NWDAF_ANALYTICS_ID=DN_PERFORMANCE \
   -e SMF_NWDAF_DNPERF_MARGIN_PERCENT=10 \
   -e SMF_NWDAF_PREDICT_SEC=60 \

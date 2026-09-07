@@ -28,7 +28,9 @@ QOSMON_RETAIN=${QOSMON_RETAIN:-1000}
 # Where the PCF reads its policy decisions from. Override for a different layout.
 # NOTE: the PCF loads EVERY file in that directory - never leave a backup there,
 # or a stale copy silently overrides entries in the live file.
-POL=${PCF_POLICY_DECISIONS:-/home/ubuntu/oai-cn5g-fed/docker-compose/policies/steering/policy_decisions}/policy_decision.yaml
+FED=${FED:-$HOME/oai-cn5g-fed/docker-compose}
+POL=${PCF_POLICY_DECISIONS:-$FED/policies/steering/policy_decisions}/policy_decision.yaml
+[ -d "$(dirname "$POL")" ] || { echo "PCF policy dir not found: $(dirname "$POL")"; echo "run ./scripts/build.sh fed, or set FED/PCF_POLICY_DECISIONS"; exit 1; }
 
 [ "$N" -ge 2 ] || { echo "need at least 2 UEs"; exit 1; }
 [ "$ANCHORS" -lt "$N" ] || { echo "need at least one steerable UE"; exit 1; }

@@ -3,6 +3,9 @@
 __pycache__/
 venv/
 .venv/
+.collector.log
+.routesync.log
+.build-*.log
 *.o
 *.so
 
@@ -20,6 +23,7 @@ nohup.out
 nwdaf-backups/
 *.pre-*
 *.bak
+*.bak-*
 *.orig
 archives/
 

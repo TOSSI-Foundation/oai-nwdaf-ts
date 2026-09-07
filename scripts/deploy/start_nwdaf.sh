@@ -1,6 +1,16 @@
 #!/bin/bash
 # Start the NWDAF stack: database, engine, nbi-analytics, nbi-events,
-# engine-traffic-steering. The SBI is deliberately NOT started here.
+# engine-traffic-steering and the SBI.
+#
+# NOTE ON THE SBI. nwdaf_stack_up.sh starts it here, which is safe because the
+# SMF is already up by this point. demo_reset_multi.sh then REMOVES and recreates
+# it before attaching UEs - deliberately, because the ordering constraint is
+# strict: the SBI must come up after the SMF is stable and before any UE
+# attaches. Too early duplicates its subscription and every usage report is
+# counted twice; too late and the UP_PATH_CH events that record which DNAI a
+# session is on are emitted with no subscriber and lost, after which
+# DN_PERFORMANCE attributes usage to a stale DNAI forever.
+# So the SBI being started twice across a full bring-up is expected, not a bug.
 #
 #   ./start_nwdaf.sh
 #
@@ -18,11 +28,27 @@ HERE=$(cd "$(dirname "$0")/../.." && pwd)
 export ENGINE_IMAGE=${ENGINE_IMAGE:-oai-nwdaf-engine:pathhealth}
 export ANALYTICS_IMAGE=${ANALYTICS_IMAGE:-oai-nwdaf-nbi-analytics:pathhealth}
 export EVENTS_IMAGE=${EVENTS_IMAGE:-oai-nwdaf-nbi-events:final}
-export STEERING_IMAGE=${STEERING_IMAGE:-oai-nwdaf-engine-traffic-steering:latest}
+# The SBI must be pinned too. nwdaf_stack_up.sh otherwise defaults it to
+# :nwdaf-hardening, whose unbounded qosmonlist grows documents to ~10 MB until
+# the SMF times out ("NWDAF returned HTTP 0").
+export SBI_IMAGE=${SBI_IMAGE:-oai-nwdaf-sbi:qosmon-retain}
 
-for i in "$ENGINE_IMAGE" "$ANALYTICS_IMAGE" "$EVENTS_IMAGE" "$STEERING_IMAGE"; do
-  sudo docker image inspect "$i" >/dev/null 2>&1 || { echo "missing image: $i"; exit 1; }
+# OPTIONAL. oai-nwdaf-engine-traffic-steering is the ML congestion-forecast
+# component (Track 1). It is NOT on the RATE or HEALTH steering path and its
+# source and models are deliberately not part of this repository, so its absence
+# must not be fatal - it used to abort the whole bring-up here.
+export STEERING_IMAGE=${STEERING_IMAGE:-oai-nwdaf-engine-traffic-steering:latest}
+if ! sudo docker image inspect "$STEERING_IMAGE" >/dev/null 2>&1; then
+  echo "   note: $STEERING_IMAGE not present - skipping the optional ML"
+  echo "         congestion-forecast engine. RATE and HEALTH steering do not use it."
+  export SKIP_STEERING_ENGINE=1
+fi
+
+missing=0
+for i in "$ENGINE_IMAGE" "$ANALYTICS_IMAGE" "$EVENTS_IMAGE" "$SBI_IMAGE"; do
+  sudo docker image inspect "$i" >/dev/null 2>&1 || { echo "missing image: $i"; missing=1; }
 done
+[ "$missing" = 0 ] || { echo; echo "Build them first:  ./scripts/build.sh nwdaf"; exit 1; }
 
 echo "──── NWDAF stack ────"
 # On 192.168.75.0/24 deliberately: the shipped NWDAF compose uses 192.168.74.0/24,
@@ -33,7 +59,8 @@ sudo -E bash "$HERE/scripts/deploy/nwdaf_stack_up.sh"
 echo
 echo "   started:"
 for c in oai-nwdaf-database oai-nwdaf-engine oai-nwdaf-nbi-analytics \
-         oai-nwdaf-nbi-events oai-nwdaf-engine-traffic-steering; do
+         oai-nwdaf-nbi-events oai-nwdaf-sbi \
+         ${SKIP_STEERING_ENGINE:+} ${SKIP_STEERING_ENGINE:-oai-nwdaf-engine-traffic-steering}; do
   printf "     %-36s %s\n" "$c" "$(sudo docker inspect $c --format '{{.Config.Image}}' 2>/dev/null || echo MISSING)"
 done
 
@@ -42,12 +69,43 @@ echo "──── host pollers ────"
 # Both run OUTSIDE any container: the collector reads the UPF container's cgroup
 # and vppctl; the route synchroniser rewrites oai-ext-dn's return routes so the
 # DN answers on whichever N6 path a session was steered onto.
-pgrep -f '[c]ollect_upf_metrics.py' >/dev/null && echo "   already running: telemetry collector" || {
-  ( cd "$HERE" && sudo -n setsid scripts/telemetry/collect_upf_metrics.py --interval 5 >/dev/null 2>&1 & )
-  echo "   started: telemetry collector"; }
-pgrep -f '[n]wdaf_dn_route_sync.py' >/dev/null && echo "   already running: DN route sync" || {
-  ( cd "$HERE" && sudo -n setsid python3 scripts/lab/nwdaf_dn_route_sync.py --interval 2 >/dev/null 2>&1 & )
-  echo "   started: DN route sync"; }
+# The collector imports pymongo, which is NOT in the system interpreter. It
+# used to be launched as a bare ./script.py with stderr sent to /dev/null and
+# "started" printed unconditionally, so an exec failure or a missing pymongo was
+# completely silent - and with no collector there is no path health at all, every
+# DNAI reads UNKNOWN and the HEALTH rule never steers. Build a venv, then CHECK.
+VENV=${VENV:-$HERE/.venv}
+if [ ! -x "$VENV/bin/python3" ]; then
+  echo "   creating $VENV"
+  python3 -m venv "$VENV" >/dev/null 2>&1 || { echo "   FAILED: python3 -m venv (apt install python3-venv)"; exit 1; }
+  "$VENV/bin/pip" install -q -r "$HERE/scripts/telemetry/requirements.txt" \
+    || { echo "   FAILED: pip install -r scripts/telemetry/requirements.txt"; exit 1; }
+fi
+if pgrep -f '[c]ollect_upf_metrics.py' >/dev/null; then
+  echo "   already running: telemetry collector"
+else
+  ( cd "$HERE" && sudo -n setsid "$VENV/bin/python3" scripts/telemetry/collect_upf_metrics.py \
+      --interval 5 >"$HERE/.collector.log" 2>&1 & )
+  sleep 3
+  if pgrep -f '[c]ollect_upf_metrics.py' >/dev/null; then
+    echo "   started: telemetry collector"
+  else
+    echo "   FAILED to start the telemetry collector - without it NOTHING EVER STEERS:"
+    tail -5 "$HERE/.collector.log" 2>/dev/null | sed 's/^/     /'
+    exit 1
+  fi
+fi
+if pgrep -f '[n]wdaf_dn_route_sync.py' >/dev/null; then
+  echo "   already running: DN route sync"
+else
+  ( cd "$HERE" && sudo -n setsid python3 scripts/lab/nwdaf_dn_route_sync.py \
+      --interval 2 >"$HERE/.routesync.log" 2>&1 & )
+  sleep 2
+  pgrep -f '[n]wdaf_dn_route_sync.py' >/dev/null \
+    && echo "   started: DN route sync" \
+    || { echo "   FAILED to start the DN route sync - a steer will break connectivity:"
+         tail -5 "$HERE/.routesync.log" 2>/dev/null | sed 's/^/     /'; exit 1; }
+fi
 sleep 4
 
 echo
@@ -67,6 +125,6 @@ done
 [ -z "${r:-}" ] && echo "NOT REGISTERED after 60s - check oai-nwdaf-nbi-analytics logs"
 
 echo
-echo "NWDAF is up. Next: attach UEs -"
+echo "NWDAF is up. Next: attach UEs (this recreates the SBI in order) -"
 echo "  ./scripts/lab/demo_reset_multi.sh 5 1     # also starts the SBI, in order"
 echo "then follow docs/MULTI-UE-STEERING.md"

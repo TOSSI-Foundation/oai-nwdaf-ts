@@ -71,7 +71,10 @@ docker run -d --name oai-nwdaf-database --network "$NET" --ip "${PFX}.156" \
   -p 27017:27017 --restart always mongo:latest >/dev/null
 fi
 
-if up oai-nwdaf-engine-traffic-steering; then
+# OPTIONAL - the ML congestion-forecast engine (Track 1). Not on the RATE or
+# HEALTH steering path; start_nwdaf.sh sets SKIP_STEERING_ENGINE when its image
+# is absent, which is the normal case for a fresh clone of this repository.
+if [ -z "${SKIP_STEERING_ENGINE:-}" ] && up oai-nwdaf-engine-traffic-steering; then
 echo "==> oai-nwdaf-engine-traffic-steering (${PFX}.159)"
 docker run -d --name oai-nwdaf-engine-traffic-steering --network "$NET" --ip "${PFX}.159" \
   -e SERVER_PORT=8080 \

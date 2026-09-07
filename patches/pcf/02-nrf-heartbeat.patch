@@ -1,0 +1,106 @@
+# PCF: actually send NRF heartbeats, and send them in the format TS 29.510 requires
+#
+# Upstream : https://gitlab.eurecom.fr/oai/cn5g/oai-cn5g-pcf.git
+# Base     : 67aee53df01542a0deccf32874bfb90b38c547b3
+# Apply    : git checkout 67aee53df01542a0deccf32874bfb90b38c547b3 \
+#            && git apply 01-dnai-authorization.patch && git apply <this file>
+#
+# THIS PATCH IS REQUIRED. Without it the PCF disappears from the NRF ~50 s after
+# every start, while still logging "NF registration successful". The SMF then
+# cannot discover it, no session gets a PCC rule, no DNAI is authorized, and
+# steering silently never happens.
+#
+# Three defects, all in the heartbeat path:
+#   1. task_manager was implemented but never instantiated, so pcf_event::task_tick
+#      was never emitted and ZERO heartbeats were ever sent.
+#   2. NFUpdate was serialised as a bare object. TS 29.510 requires an RFC 6902
+#      JSON Patch ARRAY, so the NRF answered 400.
+#   3. A single failed heartbeat called m_task_connection.disconnect(), which
+#      stopped heartbeats permanently instead of retrying on the next tick.
+#
+diff --git a/src/oai_pcf/main.cpp b/src/oai_pcf/main.cpp
+index f454eb0..6063231 100644
+--- a/src/oai_pcf/main.cpp
++++ b/src/oai_pcf/main.cpp
+@@ -29,6 +29,7 @@
+ #include "nf_launch.hpp"
+ #include "conversions.hpp"
+ #include "http_client.hpp"
++#include "task_manager.hpp"
+ 
+ #include <iostream>
+ #include <csignal>
+@@ -149,6 +150,23 @@ int main(int argc, char** argv) {
+   // PCF application layer
+   pcf_app_inst = std::make_unique<pcf_app>(ev);
+ 
++  // Periodic task engine.
++  //
++  // WHY THIS IS HERE. pcf_nrf::start_event_nf_heartbeat() subscribes the NRF
++  // heartbeat to pcf_event::task_tick, but NOTHING in the PCF ever emitted that
++  // tick - task_manager was implemented and then never instantiated. The
++  // subscription therefore sat idle, the PCF sent zero heartbeats, and the NRF
++  // did exactly what it should: marked the profile SUSPENDED after the
++  // heartBeatTimer elapsed and later deleted it. The PCF was consequently
++  // invisible to Nnrf_NFDiscovery within ~50 s of every start, while still
++  // reporting "NF registration successful".
++  //
++  // manage_tasks() is an infinite 1 ms loop, so it gets its own detached thread -
++  // the same shape as the HTTP servers started below.
++  oai::pcf::app::task_manager tm(ev);
++  std::thread pcf_task_manager(&oai::pcf::app::task_manager::run, &tm);
++  pcf_task_manager.detach();
++
+   std::string v4_address =
+       oai::utils::conv::toString(pcf_cfg->local().get_sbi().get_addr4());
+ 
+diff --git a/src/pcf_app/pcf_nrf.cpp b/src/pcf_app/pcf_nrf.cpp
+index ab27fad..ec45096 100644
+--- a/src/pcf_app/pcf_nrf.cpp
++++ b/src/pcf_app/pcf_nrf.cpp
+@@ -145,8 +145,18 @@ void pcf_nrf::trigger_nf_heartbeat_procedure(uint64_t /* ms */) {
+   patch_items.push_back(patch_item);
+   Logger::pcf_sbi().info("Sending NF heartbeat request");
+ 
+-  nlohmann::json j;
+-  to_json(j, patch_item);
++  // TS 29.510 NFUpdate is an RFC 6902 JSON Patch, i.e. an ARRAY of PatchItems.
++  // Serialising the single item as a bare object makes the NRF answer 400 - and
++  // because the failure path below disconnects the task, ONE rejected heartbeat
++  // used to stop them permanently, after which the NRF suspended and then
++  // deleted the profile. Build the array, exactly as smf_sbi::update_nf_instance
++  // does.
++  nlohmann::json j = nlohmann::json::array();
++  for (const auto& it : patch_items) {
++    nlohmann::json item = {};
++    to_json(item, it);
++    j.push_back(item);
++  }
+ 
+   auto request = http_client_inst->prepare_json_request(m_nrf_url, j.dump());
+   auto http_response =
+@@ -156,12 +166,20 @@ void pcf_nrf::trigger_nf_heartbeat_procedure(uint64_t /* ms */) {
+       http_response.status_code == http_status_code::NO_CONTENT) {
+     Logger::pcf_sbi().debug("NF heartbeat request successful");
+   } else {
+-    // TODO what should we do in this case?
+-    // We disconnect, but we dont trigger anything else
++    // Do NOT disconnect on a single failure. The NRF can be briefly unreachable
++    // while it restarts, and giving up permanently means the profile is
++    // suspended and then deleted with no way back short of restarting the PCF.
++    // Keep the periodic task alive and let the next tick retry; if the profile
++    // has already been dropped the NRF answers 404 and the re-registration
++    // below restores it.
+     Logger::pcf_sbi().warn(
+-        "NF heartbeat request failed. Wrong response code %d",
++        "NF heartbeat request failed (HTTP %d) - will retry on the next tick",
+         http_response.status_code);
+-    m_task_connection.disconnect();
++    if (http_response.status_code == http_status_code::NOT_FOUND) {
++      Logger::pcf_sbi().info(
++          "NRF no longer holds this PCF profile - re-registering");
++      register_to_nrf();
++    }
+   }
+ }
+ //------------------------------------------------------------------------------
