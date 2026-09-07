@@ -8,14 +8,22 @@ Goal: clone → build → run → attach a UE → generate traffic → see analy
 |---|---|
 | OS | Ubuntu 22.04 LTS (validated); anything with cgroup v2 and `iproute2` should work |
 | Docker | 24+ (validated on 29.1.3), and your user in the `docker` group or `sudo` rights |
-| docker-compose | **v1.29.2** — the compose file is v1 syntax. See the warning below |
+| Compose | **required, and not part of docker.io** — either the v2 plugin (`docker-compose-plugin`, recommended) or v1 (`docker-compose`). `start_core.sh` detects whichever is present and refuses to start without one. |
 | RAM / disk | ~8 GB RAM, ~40 GB free disk (the C++ NF build images are large) |
 | Host packages | `iproute2` (`tc`), `python3`, `python3-venv`, `curl`, `bc`, `git` |
 | Build | nothing else — every compiler runs inside a container |
 
 ```bash
-sudo apt install -y iproute2 python3 python3-venv curl bc git docker-compose
+sudo apt install -y iproute2 python3 python3-venv curl bc git \
+                    docker.io docker-compose-plugin
+sudo usermod -aG docker $USER && newgrp docker
 ```
+
+**Compose is a separate package from Docker itself.** Installing `docker.io` alone
+gives you no `docker compose` and no `docker-compose`, and `make core` then stops at
+`sudo: docker-compose: command not found` — after which every later step fails for
+its own unrelated-looking reason. If you prefer v1, `sudo apt install -y docker-compose`
+works too, but see the v1 warning below.
 
 **One external repository is required and is deliberately not vendored here:**
 [`oai-cn5g-fed`](https://gitlab.eurecom.fr/oai/cn5g/oai-cn5g-fed) supplies
@@ -241,6 +249,11 @@ checks the SMF patch still applies to the base commit it names, and scans for
 credential material — entirely in temp directories and throwaway containers, so it
 is safe to run while a demo is live.
 
+**Expect 22 passed / 1 SKIP on a fresh machine, 23 passed once `build.sh nfs` has
+run.** Step 2 (SMF C++ compiles) needs the cached SMF *builder* image, which only
+exists after a full NF build; it reports `SKIP  no cached SMF builder image on this
+host` until then. A SKIP is not a failure — the run still exits 0.
+
 ## 8. Troubleshooting
 
 Every entry below is a failure that has actually happened here, in the order you
@@ -248,6 +261,9 @@ are likely to meet them.
 
 | Symptom | Cause | Fix |
 |---|---|---|
+| `sudo: docker-compose: command not found` | neither compose generation is installed — `docker.io` does not include one | `sudo apt install -y docker-compose-plugin` |
+| `network demo-oai-public-net not found` during `make nwdaf` | the core never came up, so `make core` must have failed | scroll back to `make core`; fix that, then re-run `make nwdaf` |
+| `No such container: vpp-upf` during `make ues` | same — the core is not running | `make core` first; `make ues` now refuses to start without it |
 | `missing image: oai-nwdaf-engine:pathhealth` | `build.sh` has not been run | `./scripts/build.sh nwdaf` |
 | `oai-cn5g-fed not found at ...` | the external dependency is not cloned | `./scripts/build.sh fed`, or set `FED` |
 | **Nothing ever steers, and there is no error anywhere** | the telemetry collector is not running, so every DNAI reads `UNKNOWN` | `pgrep -af collect_upf_metrics.py`; if empty, re-run `start_nwdaf.sh` and read `.collector.log` |

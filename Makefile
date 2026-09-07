@@ -116,7 +116,8 @@ clean:
 	@sudo docker rm -f oai-nwdaf-engine oai-nwdaf-nbi-analytics oai-nwdaf-nbi-events \
 	   oai-nwdaf-engine-traffic-steering oai-nwdaf-database oai-smf 2>/dev/null || true
 	@cd $${FED:-$$HOME/oai-cn5g-fed/docker-compose} && \
-	   sudo docker-compose -f docker-compose-basic-vpp-pcf-steering.yaml down 2>&1 | tail -3 || true
+	   { sudo docker compose version >/dev/null 2>&1 && C="docker compose" || C=docker-compose; } && \
+	   sudo $$C -f docker-compose-basic-vpp-pcf-steering.yaml down 2>&1 | tail -3 || true
 	@for n in demo-oai-public-net oai-public-access oai-public-core-pri oai-public-core-sec oai-nwdaf-net; do \
 	   sudo docker network rm $$n >/dev/null 2>&1 || true; done
 	@echo "  containers left: $$(sudo docker ps -q | wc -l)   (volumes kept)"

@@ -50,19 +50,40 @@ for i in "$ENGINE_IMAGE" "$ANALYTICS_IMAGE" "$EVENTS_IMAGE" "$SBI_IMAGE"; do
 done
 [ "$missing" = 0 ] || { echo; echo "Build them first:  ./scripts/build.sh nwdaf"; exit 1; }
 
+# The NWDAF engine, analytics and SBI all attach to the CONTROL-PLANE network as
+# well, so the core must already exist. Without this check nwdaf_stack_up.sh gets
+# as far as 'docker network connect', dies under set -e leaving the stack half
+# built, and the failure reads as an NWDAF problem rather than "the core is not up".
+for n in demo-oai-public-net; do
+  sudo docker network inspect "$n" >/dev/null 2>&1 || {
+    echo "FAIL: network '$n' does not exist - the 5G core is not running."
+    echo "      Run ./scripts/deploy/start_core.sh first, and check it succeeded."
+    exit 1; }
+done
+
 echo "──── NWDAF stack ────"
 # On 192.168.75.0/24 deliberately: the shipped NWDAF compose uses 192.168.74.0/24,
 # which is this deployment's SECONDARY N6 network. Creating it as shipped would
 # collide with the path steering moves traffic onto.
-sudo -E bash "$HERE/scripts/deploy/nwdaf_stack_up.sh"
+sudo -E bash "$HERE/scripts/deploy/nwdaf_stack_up.sh" || {
+  echo; echo "FAIL: nwdaf_stack_up.sh aborted - the stack is only partly up."
+  echo "      Fix the error above, then: make clean && make core && make nwdaf"
+  exit 1; }
 
 echo
 echo "   started:"
-for c in oai-nwdaf-database oai-nwdaf-engine oai-nwdaf-nbi-analytics \
-         oai-nwdaf-nbi-events oai-nwdaf-sbi \
-         ${SKIP_STEERING_ENGINE:+} ${SKIP_STEERING_ENGINE:-oai-nwdaf-engine-traffic-steering}; do
-  printf "     %-36s %s\n" "$c" "$(sudo docker inspect $c --format '{{.Config.Image}}' 2>/dev/null || echo MISSING)"
+LIST="oai-nwdaf-database oai-nwdaf-engine oai-nwdaf-nbi-analytics oai-nwdaf-nbi-events oai-nwdaf-sbi"
+[ -z "${SKIP_STEERING_ENGINE:-}" ] && LIST="$LIST oai-nwdaf-engine-traffic-steering"
+missing=0
+for c in $LIST; do
+  img=$(sudo docker inspect "$c" --format '{{.Config.Image}}' 2>/dev/null)
+  [ -n "$img" ] || { img=MISSING; missing=1; }
+  printf "     %-36s %s\n" "$c" "$img"
 done
+[ "$missing" = 0 ] || { echo
+  echo "FAIL: not every NWDAF container started. Do not continue to 'make ues' -"
+  echo "      it will report unrelated timeouts. Fix the cause above first."
+  exit 1; }
 
 echo
 echo "──── host pollers ────"

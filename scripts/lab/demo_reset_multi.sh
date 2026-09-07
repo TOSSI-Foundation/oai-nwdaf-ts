@@ -33,6 +33,21 @@ POL=${PCF_POLICY_DECISIONS:-$FED/policies/steering/policy_decisions}/policy_deci
 [ -d "$(dirname "$POL")" ] || { echo "PCF policy dir not found: $(dirname "$POL")"; echo "run ./scripts/build.sh fed, or set FED/PCF_POLICY_DECISIONS"; exit 1; }
 
 [ "$N" -ge 2 ] || { echo "need at least 2 UEs"; exit 1; }
+
+# Fail fast on a core that is not up. Without this the script restarts three
+# containers that do not exist, waits out three 60 s timeouts, and only then
+# fails while creating UEs - so the reported error is a UE error and the real
+# cause (no core) is 200 lines up.
+for c in vpp-upf oai-smf oai-pcf; do
+  sudo docker inspect --type container "$c" >/dev/null 2>&1 || {
+    echo "FAIL: container '$c' does not exist - the 5G core is not running."
+    echo "      Run ./scripts/deploy/start_core.sh first."; exit 1; }
+done
+for n in demo-oai-public-net oai-public-access; do
+  sudo docker network inspect "$n" >/dev/null 2>&1 || {
+    echo "FAIL: network '$n' does not exist - the 5G core is not running."
+    echo "      Run ./scripts/deploy/start_core.sh first."; exit 1; }
+done
 [ "$ANCHORS" -lt "$N" ] || { echo "need at least one steerable UE"; exit 1; }
 
 sess_count(){ sudo docker exec vpp-upf $V show upf session 2>/dev/null | grep -cE "^CP F-SEID"; }
