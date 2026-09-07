@@ -100,7 +100,7 @@ services:
                 ipv4_address: 192.168.70.132
     oai-smf:
         container_name: "oai-smf"
-        image: oai-smf:nwdaf-policy
+        image: oai-smf:serialize
         expose:
             - 80/tcp
             - 8080/tcp

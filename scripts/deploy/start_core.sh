@@ -44,10 +44,26 @@ echo "Compose: $COMPOSE_CMD"
                             echo "      run ./scripts/build.sh fed"; exit 1; }
 [ -f "$FED/database/oai_db2.sql" ] || { echo "FAIL: $FED/database/oai_db2.sql missing"
                                         echo "      without it no UE can authenticate"; exit 1; }
+# Check the images the COMPOSE FILE names, not a hand-maintained list - the two
+# drifted apart once already (compose pinned oai-smf:nwdaf-policy while build.sh
+# produced oai-smf:serialize) and the hardcoded list happily passed.
+#
+# Only locally-built tags matter here: 'oai-*' or 'gnbsim*' with no registry
+# namespace. Everything with a '/' (oaisoftwarealliance/...) and the official
+# images (mysql, mongo) are pullable and compose will fetch them.
+#
+# A missing local tag is not a small error. Compose tries to PULL it, the pull is
+# denied, and that aborts the PARALLEL pull for every other image too - so one
+# absent tag surfaces as eight 'No such image' lines and hides its own cause.
 miss=0
-for i in oai-nrf:nwdaf-disc-amfalias oai-pcf:heartbeat "$SMF_IMAGE"; do
-  sudo docker image inspect "$i" >/dev/null 2>&1 || { echo "FAIL: missing image $i"; miss=1; }
+for i in $(grep -oP '^\s+image:\s*\K\S+' "$FED/$COMPOSE" | sort -u \
+           | grep -Ev '/' | grep -E '^(oai-|gnbsim)'); do
+  sudo docker image inspect "$i" >/dev/null 2>&1 \
+    || { echo "FAIL: $COMPOSE needs image '$i', which is not present locally"; miss=1; }
 done
+# start_core.sh replaces the SMF with this one in step 2/2, so it must exist too.
+sudo docker image inspect "$SMF_IMAGE" >/dev/null 2>&1 \
+  || { echo "FAIL: missing image $SMF_IMAGE (SMF_IMAGE)"; miss=1; }
 [ "$miss" = 0 ] || { echo "      run ./scripts/build.sh nfs   (a full C++ build, hours)"; exit 1; }
 
 while [ $# -gt 0 ]; do case "$1" in --rule) RULE=$2; shift 2;; *) shift;; esac; done
@@ -90,8 +106,24 @@ echo "──── 1/2  core NFs ────"
 # 'ContainerConfig' on locally-built images. If that happens, recreate the
 # affected container by hand from a saved 'docker inspect', replaying networks,
 # env, entrypoint AND HostConfig.PortBindings.
+# REMOVE THE STANDALONE SMF FIRST - this is what makes the script idempotent.
+#
+# Step 2/2 below replaces the compose-created oai-smf with a standalone container
+# carrying the NWDAF consumer. That container has no com.docker.compose.project
+# label, so on the NEXT run compose does not recognise it as its own, tries to
+# CREATE oai-smf, and the whole 'up' dies with
+#     Conflict. The container name "/oai-smf" is already in use
+# leaving every other NF up and the core half-started. The script therefore
+# worked exactly once per machine and failed on every rerun.
+#
+# Removing it here costs nothing: step 2/2 recreates it a few seconds later.
+sudo docker rm -f oai-smf >/dev/null 2>&1 || true
+
 ( cd "$FED" && sudo $COMPOSE_CMD -f "$COMPOSE" up -d ) || {
-  echo "FAIL: compose could not bring the core up (see the error above)."; exit 1; }
+  echo "FAIL: compose could not bring the core up (see the error above)."
+  echo "      If it names a container-name Conflict, that container was created"
+  echo "      outside compose - remove it and rerun:  sudo docker rm -f <name>"
+  exit 1; }
 for c in mysql oai-nrf oai-amf oai-ausf oai-udm oai-udr oai-pcf vpp-upf oai-ext-dn; do
   wait_healthy "$c" 40 || true
 done

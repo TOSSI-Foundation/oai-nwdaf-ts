@@ -111,7 +111,7 @@ index e253447..20546b6 100644
      oai-smf:
          container_name: "oai-smf"
 -        image: oaisoftwarealliance/oai-smf:v2.0.0
-+        image: oai-smf:nwdaf-policy
++        image: oai-smf:serialize
          expose:
              - 80/tcp
              - 8080/tcp
