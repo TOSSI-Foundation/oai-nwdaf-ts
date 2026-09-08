@@ -146,6 +146,4 @@ done
 [ -z "${r:-}" ] && echo "NOT REGISTERED after 60s - check oai-nwdaf-nbi-analytics logs"
 
 echo
-echo "NWDAF is up. Next: attach UEs (this recreates the SBI in order) -"
-echo "  ./scripts/lab/demo_reset_multi.sh 5 1     # also starts the SBI, in order"
-echo "then follow docs/MULTI-UE-STEERING.md"
+echo "NWDAF is up."

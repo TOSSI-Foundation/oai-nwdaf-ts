@@ -156,4 +156,4 @@ sudo docker exec vpp-upf /openair-upf/bin/vppctl show upf association 2>/dev/nul
   || echo "   WARNING: no PFCP association - check the SMF's --add-host for the UPF FQDN"
 
 echo
-echo "Core is up. Next:  ./scripts/deploy/start_nwdaf.sh"
+echo "Core is up."
