@@ -31,8 +31,8 @@ help:
 	@echo "  make up              all three, end to end"
 	@echo
 	@echo "Testing:"
-	@echo "  make test-health     automated HEALTH steering test, PASS/FAIL"
-	@echo "  make test-rate       automated RATE steering test, PASS/FAIL"
+	@echo "  make test-health     automated HEALTH steering test  [WAIT=180 RATE=40mbit]"
+	@echo "  make test-rate       automated RATE steering test    [WAIT=300]"
 	@echo "  make load            traffic on every UE         [MBPS=60 SECS=1800 PROTO=udp]"
 	@echo "  make steer           degrade a path to trigger a steer  [IFACE=n6-3 RATE=40mbit]"
 	@echo "  make unsteer         remove the impairment       <- ALWAYS run this"
@@ -97,13 +97,33 @@ verify:
 # The two steering rules, each with a PASS/FAIL verdict verified against the
 # UPF's forwarding state rather than against a log line. test-health impairs a
 # path and ALWAYS removes the qdisc again, including on Ctrl-C.
+#
+# WAIT overrides how long each waits for a steer. test-rate is given longer
+# because DN_PERFORMANCE averages over a 300 s window, so the rate separation has
+# to build before there is anything to rank.
 test-health:
-	@./scripts/test-health.sh
+	@./scripts/test-health.sh $(or $(WAIT),180) $(RATE)
 
 test-rate:
-	@./scripts/test-rate.sh
+	@./scripts/test-rate.sh $(or $(WAIT),300)
 
-test: test-health test-rate
+# NOT 'test: test-health test-rate'. The two rules are mutually exclusive - they
+# are selected by SMF_NWDAF_DNPERF_RULE on the SMF container - so running them
+# back to back always fails whichever one the SMF is not configured for. Each
+# needs its own core bring-up, and RATE additionally needs a different traffic
+# shape (anchor loaded, steerable UEs idle), so this cannot be one target.
+test:
+	@echo "The two rules cannot run back to back - the SMF is built for one at a time."
+	@echo
+	@echo "  HEALTH:  make core RULE=HEALTH && make ues && make load"
+	@echo "           make test-health"
+	@echo
+	@echo "  RATE:    SMF_NWDAF_PREDICT_SEC=0 make core RULE=RATE && make ues"
+	@echo "           load the ANCHOR only, leave the steerable UEs idle, then"
+	@echo "           make test-rate"
+	@echo
+	@echo "See docs/MULTI-UE-STEERING.md section 5."
+	@false
 
 # Removes containers and networks but NOT volumes: the NWDAF MongoDB is on an
 # anonymous volume, and 'docker-compose down -v' would destroy every metric ever
