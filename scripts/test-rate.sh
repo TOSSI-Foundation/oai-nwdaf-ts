@@ -100,6 +100,25 @@ echo "$RATES" | awk '{printf "        %-22s avgTrafficRate=%s\n",$1,$3" "$4}'
 BUSIEST=$(echo "$RATES" | sort -k2 -rn | head -1 | awk '{print $1}')
 [ -n "$BUSIEST" ] && info "argmax(avgTrafficRate) = $BUSIEST - sessions should converge here"
 
+# THE CONFIDENCE FLOOR IS THE USUAL REASON A RATE RUN "DOES NOTHING".
+# With SMF_NWDAF_PREDICT_SEC > 0 the SMF asks for PREDICTIONS, and drops any DNAI
+# whose Confidence is under SMF_NWDAF_MIN_CONFIDENCE (50). Confidence rises as the
+# 300 s analytics window fills, so for the first few minutes of traffic BOTH DNAIs
+# are rejected, nothing is ranked, and the preference simply never changes - with
+# the only clue buried in the SMF log. Measured from cold: 39 at t+1min, crossing
+# 50 at about t+5min, after which the steer fired within one 10 s poll.
+FLOOR=$(sudo docker logs oai-smf --since 30s 2>&1 \
+        | grep -oP 'below the configured confidence floor of \K[0-9]+' | tail -1)
+CONF=$(sudo docker logs oai-smf --since 30s 2>&1 | grep -oP 'confidence=\K[0-9]+' | tail -1)
+if [ -n "$FLOOR" ]; then
+  info "NOTE: the SMF is currently REJECTING every DNAI - confidence ${CONF:-?} < floor $FLOOR."
+  info "      Confidence climbs as the 300 s window fills; this usually clears a few"
+  info "      minutes after traffic starts. If it does not, either keep traffic running"
+  info "      longer, or remove the floor for statistics-only mode:"
+  info "        make core RULE=RATE  with  SMF_NWDAF_PREDICT_SEC=0"
+  info "      (a STATISTIC carries no Confidence, so the floor never applies to it)"
+fi
+
 hdr "3. waiting up to ${WAIT}s for a RATE-driven steer"
 info "expecting sessions to move TOWARD the higher-rate DNAI"
 T0=$(date +%s); SAW_DECISION=0; SAW_ACTUATION=0; T_DEC=; T_ACT=
@@ -141,8 +160,16 @@ for kv in $BEFORE; do
   fi
 done
 
-[ $SAW_DECISION -eq 1 ] && pass "decision:   the SMF ranked and selected a DNAI (t+${T_DEC}s)" \
-                        || fail "decision:   the SMF logged no per-session selection in ${WAIT}s"
+if [ $SAW_DECISION -eq 1 ]; then
+  pass "decision:   the SMF ranked and selected a DNAI (t+${T_DEC}s)"
+else
+  fail "decision:   the SMF logged no per-session selection in ${WAIT}s"
+  F=$(sudo docker logs oai-smf --since "${WAIT}s" 2>&1 \
+      | grep -oP 'below the configured confidence floor of \K[0-9]+' | tail -1)
+  C=$(sudo docker logs oai-smf --since 30s 2>&1 | grep -oP 'confidence=\K[0-9]+' | tail -1)
+  [ -n "$F" ] && info "CAUSE: every DNAI was rejected by the confidence floor ($F); latest confidence ${C:-?}."
+  [ -n "$F" ] && info "       Leave the traffic running and re-run, or use SMF_NWDAF_PREDICT_SEC=0."
+fi
 [ $MOVED -gt 0 ] && pass "actuation:  $MOVED session(s) changed network instance in the UPF (t+${T_ACT:-?}s)" \
                  || fail "actuation:  no session moved"
 if [ $MOVED -gt 0 ] && [ -n "${BUSIEST:-}" ]; then

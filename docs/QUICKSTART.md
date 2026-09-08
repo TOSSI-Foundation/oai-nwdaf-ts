@@ -263,6 +263,8 @@ are likely to meet them.
 |---|---|---|
 | `dial tcp [2600:9000:...]:443: connect: network is unreachable` while compose pulls | DNS returned a AAAA record for Docker Hub's CDN and the host has no working IPv6 route | retry first (pulls resume); if it persists: `sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1 && sudo systemctl restart docker` |
 | `pull access denied for oai-smf` (or any `oai-*`) | compose names a locally-built tag that was never built — it is not on any registry | `./scripts/build.sh nfs`, and check `git pull` actually brought the compose file you expect |
+| RATE test does nothing; SMF log says `ignored N predicted DNAI(s) below the configured confidence floor of 50` | predictions are rejected until Confidence rises, which takes a few minutes of traffic as the 300 s window fills | keep the load running and re-run — measured 39 at t+1 min, 51 at t+5 min. Or set `SMF_NWDAF_PREDICT_SEC=0` for statistics-only, which carry no Confidence |
+| RATE test reports `all N sessions are already on <dnai>` | RATE is a one-way ratchet — once everything converges on the busier path there is no second path to compare | `make ues UES=3 ANCHORS=1` to reset, then load the anchor only |
 | `sudo: docker-compose: command not found` | neither compose generation is installed — `docker.io` does not include one | `sudo apt install -y docker-compose-plugin` |
 | `network demo-oai-public-net not found` during `make nwdaf` | the core never came up, so `make core` must have failed | scroll back to `make core`; fix that, then re-run `make nwdaf` |
 | `No such container: vpp-upf` during `make ues` | same — the core is not running | `make core` first; `make ues` now refuses to start without it |
