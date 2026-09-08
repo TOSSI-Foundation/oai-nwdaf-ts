@@ -138,10 +138,17 @@ echo "──── 2/2  SMF: $SMF_IMAGE, rule=$RULE ────"
 sudo docker rm -f oai-nwdaf-sbi >/dev/null 2>&1
 sudo FED="$FED" bash "$HERE/scripts/deploy/recreate_smf.sh" "$SMF_IMAGE" \
   -e SMF_NWDAF_ANALYTICS_ID=DN_PERFORMANCE \
-  -e SMF_NWDAF_DNPERF_MARGIN_PERCENT=10 \
-  -e SMF_NWDAF_PREDICT_SEC=60 \
-  -e SMF_NWDAF_MIN_CONFIDENCE=50 \
-  -e SMF_NWDAF_ACT=1 \
+  -e SMF_NWDAF_DNPERF_MARGIN_PERCENT="${SMF_NWDAF_DNPERF_MARGIN_PERCENT:-10}" \
+  `# PREDICT_SEC>0 asks for PREDICTIONS, which carry a Confidence, and any DNAI` \
+  `# under MIN_CONFIDENCE is dropped. Confidence tracks the analytics window and` \
+  `# is not monotonic - measured on a 3-UE lab it rose 39->51 over ~5 min of` \
+  `# traffic, fired the steer, then decayed back to ~35 and stayed there. RATE` \
+  `# therefore has only a transient window in which it can act.` \
+  `# SMF_NWDAF_PREDICT_SEC=0 selects STATISTICS, which carry no Confidence at` \
+  `# all, so the floor never applies - that is the reliable way to exercise RATE.` \
+  -e SMF_NWDAF_PREDICT_SEC="${SMF_NWDAF_PREDICT_SEC:-60}" \
+  -e SMF_NWDAF_MIN_CONFIDENCE="${SMF_NWDAF_MIN_CONFIDENCE:-50}" \
+  -e SMF_NWDAF_ACT="${SMF_NWDAF_ACT:-1}" \
   -e SMF_NWDAF_DNPERF_RULE="$RULE"
 wait_healthy oai-smf 40
 sudo docker exec vpp-upf /openair-upf/bin/vppctl show upf association 2>/dev/null | grep -q 'Node: oai-smf' \

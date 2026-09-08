@@ -113,6 +113,8 @@ MAX steers in any single cycle: 1
 
 | variable | default | meaning |
 |---|---|---|
+| `SMF_NWDAF_PREDICT_SEC` | `60` | ask for predictions this far ahead; **`0` = statistics only, which carry no Confidence so the floor below never applies** |
+| `SMF_NWDAF_MIN_CONFIDENCE` | `50` | predicted DNAIs under this are dropped. Confidence is not monotonic — measured 39→51 over ~5 min of traffic, then decaying to ~35 |
 | `SMF_NWDAF_DNPERF_RULE` | `RATE` | `HEALTH` selects the path-health rule |
 | `SMF_NWDAF_STEER_MAX_PER_CYCLE` | `1` | steers per evaluation cycle; `0` disables the limit |
 | `SMF_NWDAF_HEALTH_MAX_AGE_SEC` | `30` | consumer-side freshness bound |
