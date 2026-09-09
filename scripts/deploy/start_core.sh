@@ -44,6 +44,18 @@ echo "Compose: $COMPOSE_CMD"
                             echo "      run ./scripts/build.sh fed"; exit 1; }
 [ -f "$FED/database/oai_db2.sql" ] || { echo "FAIL: $FED/database/oai_db2.sql missing"
                                         echo "      without it no UE can authenticate"; exit 1; }
+# The PCF is the AUTHORIZATION authority: ulcl_config.yaml sets
+# use_local_pcc_rules: no, so the SMF fetches the authorized DNAI set from the
+# PCF at every PDU session establishment. If these three directories are not
+# mounted the PCF starts, reports healthy, registers in the NRF - and authorizes
+# NOTHING, so the SMF logs "HOLD: only one PCF-authorized DNAI" forever and no
+# steer can ever happen. That is a silent failure, so check it here.
+for d in pcc_rules traffic_rules policy_decisions; do
+  [ -d "$FED/policies/steering/$d" ] || {
+    echo "FAIL: PCF policy directory missing: $FED/policies/steering/$d"
+    echo "      the PCF would start but authorize no DNAI for any subscriber"
+    echo "      run ./scripts/build.sh fed"; exit 1; }
+done
 # Check the images the COMPOSE FILE names, not a hand-maintained list - the two
 # drifted apart once already (compose pinned oai-smf:nwdaf-policy while build.sh
 # produced oai-smf:serialize) and the hardcoded list happily passed.
@@ -128,6 +140,43 @@ for c in mysql oai-nrf oai-amf oai-ausf oai-udm oai-udr oai-pcf vpp-upf oai-ext-
   wait_healthy "$c" 40 || true
 done
 
+# ── PCF check ────────────────────────────────────────────────────────────────
+# 'healthy' is not enough for the PCF. Its documented failure mode is that it
+# starts, logs "NF registration successful", and is then PURGED by the NRF ~50 s
+# later because it never heartbeats - which happens whenever it was built
+# without patches/pcf/02-nrf-heartbeat.patch. After that the SMF cannot discover
+# it, nothing is authorized to steer, and there is no error anywhere. So check
+# that it is actually IN the NRF, and that it actually loaded a policy.
+echo
+echo "   PCF:"
+pcf_rc=0
+if sudo docker exec oai-pcf test -s /openair-pcf/policies/policy_decisions/policy_decision.yaml 2>/dev/null; then
+  echo "      ok: policy decisions mounted"
+else
+  echo "      WARNING: no policy_decision.yaml inside oai-pcf - no SUPI is authorized."
+  echo "               'make ues' generates it; or run ./scripts/build.sh fed."
+  pcf_rc=1
+fi
+# The NRF purge takes ~50 s, so a single immediate probe can pass on a PCF that
+# is about to vanish. Poll for up to ~64 s instead. On a correctly built PCF the
+# first probe succeeds and this costs nothing.
+for _ in $(seq 8); do
+  n=$(curl --http2-prior-knowledge -s -m 5 \
+      "http://192.168.70.130:8080/nnrf-nfm/v1/nf-instances?nf-type=PCF" \
+      | grep -c '"href"' 2>/dev/null)
+  [ "${n:-0}" -gt 0 ] && break
+  sleep 8
+done
+if [ "${n:-0}" -gt 0 ]; then
+  echo "      ok: registered in the NRF"
+else
+  echo "      WARNING: the PCF is NOT registered in the NRF."
+  echo "               Most likely it was built without patches/pcf/02-nrf-heartbeat.patch,"
+  echo "               so the NRF purged its profile. Nothing will be authorized to steer."
+  echo "               Rebuild with BOTH pcf patches:  ./scripts/build.sh nfs"
+  pcf_rc=1
+fi
+
 echo
 echo "──── 2/2  SMF: $SMF_IMAGE, rule=$RULE ────"
 # The compose file ships the UPSTREAM SMF. Ours carries the NWDAF consumer, the
@@ -156,4 +205,9 @@ sudo docker exec vpp-upf /openair-upf/bin/vppctl show upf association 2>/dev/nul
   || echo "   WARNING: no PFCP association - check the SMF's --add-host for the UPF FQDN"
 
 echo
-echo "Core is up."
+if [ "${pcf_rc:-0}" = 0 ]; then
+  echo "Core is up (PCF authorizing, SMF rule=$RULE)."
+else
+  echo "Core is up, but SEE THE PCF WARNINGS ABOVE - steering cannot work until"
+  echo "the PCF is registered and has a policy decision for each subscriber."
+fi

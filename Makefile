@@ -16,12 +16,17 @@ PROTO   ?= udp
 IFACE   ?= n6-3
 RATE    ?= 40mbit
 
-.PHONY: help build up core nwdaf ues load steer unsteer status verify clean logs test test-rate test-health
+.PHONY: help build build-nwdaf build-nfs build-gnbsim build-fed \
+        up core nwdaf ues load steer unsteer status verify clean logs \
+        test test-rate test-health
 
 help:
 	@echo "First time on this machine:"
 	@echo "  make build           build every image this deployment needs"
-	@echo "  make build WHAT=nwdaf   ... only the NWDAF Go services (~2 min)"
+	@echo "  make build-nwdaf     ... only the NWDAF Go services   (~2 min)"
+	@echo "  make build-nfs       ... only SMF, PCF, NRF           (HOURS)"
+	@echo "  make build-gnbsim    ... only the UE simulator"
+	@echo "  make build-fed       ... only the oai-cn5g-fed tree + configs"
 	@echo
 	@echo "Bring-up (in order):"
 	@echo "  make core            5G core + the steering SMF (asks RATE or HEALTH)"
@@ -43,13 +48,25 @@ help:
 	@echo "  make verify          offline build/test of this checkout (touches no lab)"
 	@echo "  make clean           stop and remove everything (keeps MongoDB data)"
 	@echo
-	@echo "Full walkthrough: docs/QUICKSTART.md   Multi-UE: docs/MULTI-UE-STEERING.md"
-
-WHAT ?= all
+	@echo "Full walkthrough, configuration reference and troubleshooting: README.md"
 
 # Images first - every bring-up target below assumes the tags already exist.
+# One target per thing build.sh can build, so the name says what it does and
+# shell completion can find it. Each is still just './scripts/build.sh <arg>'.
 build:
-	@./scripts/build.sh $(WHAT)
+	@./scripts/build.sh all
+
+build-nwdaf:
+	@./scripts/build.sh nwdaf
+
+build-nfs:
+	@./scripts/build.sh nfs
+
+build-gnbsim:
+	@./scripts/build.sh gnbsim
+
+build-fed:
+	@./scripts/build.sh fed
 
 up: core nwdaf ues
 	@echo "Stack is up. Next: make load, then make steer"
@@ -122,7 +139,7 @@ test:
 	@echo "           load the ANCHOR only, leave the steerable UEs idle, then"
 	@echo "           make test-rate"
 	@echo
-	@echo "See docs/MULTI-UE-STEERING.md section 5."
+	@echo "See README.md section 8 (Testing)."
 	@false
 
 # Removes containers and networks but NOT volumes: the NWDAF MongoDB is on an

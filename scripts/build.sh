@@ -5,7 +5,7 @@
 #   ./scripts/build.sh nwdaf      # the four NWDAF Go services only
 #   ./scripts/build.sh nfs        # SMF, PCF, NRF  (clone upstream, patch, build)
 #   ./scripts/build.sh gnbsim     # the UE simulator
-#   ./scripts/build.sh fed        # oai-cn5g-fed + the deployment patch + configs
+#   ./scripts/build.sh fed        # oai-cn5g-fed + this repo's compose/configs/policies
 #
 # WHY THIS EXISTS. The OAI network functions are deliberately NOT vendored - the
 # repository ships patches against pinned upstream commits instead. That is the
@@ -199,6 +199,13 @@ build_fed(){
   # The compose file needs database/oai_db2.sql and healthscripts/, which live in
   # oai-cn5g-fed and are NOT duplicated here. The repo ships the compose file and
   # the configs; this puts them where the compose file expects to find them.
+  #
+  # patches/deployment/01-steering-topology.patch is deliberately NOT applied
+  # here. It is the RECORD of how this topology differs from upstream fed (second
+  # N6 DNAI, the PCF service and its policy mounts, the SMF_NWDAF_* env) - and
+  # every one of those changes is already materialised in the files copied below,
+  # which overwrite the upstream ones. Applying both would conflict. Read the
+  # patch to review the delta; run this function to deploy it.
   if [ ! -d "$FED_DIR/.git" ]; then
     echo "  cloning oai-cn5g-fed"
     git clone --quiet "$FED_REPO" "$FED_DIR" || { bad "clone oai-cn5g-fed"; return 1; }
@@ -213,7 +220,14 @@ build_fed(){
   cp "$HERE"/compose/docker-compose-basic-vpp-pcf-steering.yaml \
      "$HERE"/compose/docker-compose-gnbsim-vpp-additional.yaml "$F/"   && ok "compose files installed"
   cp "$HERE"/configs/nf/ulcl_config.yaml "$F/conf/"                    && ok "ulcl_config.yaml installed"
+  # These three directories ARE the PCF's authorization data. The compose file
+  # mounts policies/steering into /openair-pcf/policies, and without them the PCF
+  # starts, reports healthy, and authorizes no DNAI for anyone - so nothing can
+  # ever steer, with no error anywhere. start_core.sh re-checks this.
   cp -r "$HERE"/configs/pcf-policies/. "$F/policies/steering/"         && ok "PCF steering policies installed"
+  for d in pcc_rules traffic_rules policy_decisions; do
+    [ -d "$F/policies/steering/$d" ] || bad "PCF policy dir not installed: $d"
+  done
   echo "  FED_DIR=$FED_DIR"
 }
 

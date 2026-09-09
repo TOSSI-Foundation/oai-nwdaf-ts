@@ -122,8 +122,13 @@ services:
             - SMF_NWDAF_DNAI_CONGESTED=internet-secondary
         extra_hosts:
             - "vpp-upf.node.5gcn.mnc95.mcc208.3gppnetwork.org:192.168.70.201"
+        # ulcl_config.yaml sets use_local_pcc_rules: no, so the SMF fetches the
+        # SM policy - and with it the set of AUTHORIZED DNAIs - from the PCF at
+        # every PDU session establishment. Without the PCF up first, a session
+        # gets no alternative DNAI and steering can never happen.
         depends_on:
             - oai-amf
+            - oai-pcf
         networks:
             public_net:
                 ipv4_address: 192.168.70.133

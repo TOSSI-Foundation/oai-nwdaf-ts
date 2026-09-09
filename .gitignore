@@ -43,4 +43,11 @@ policies/nrf-live/
 .vscode/
 .idea/
 *.swp
-docs/PROJECT-HISTORY.md
+
+# --- local engineering notes ---
+# README.md is the only Markdown file this repository publishes. Anything else
+# is a local working note and stays out of the push. Note this ignores Markdown
+# under docs/ only - images such as the architecture figure are tracked normally.
+/docs/*.md
+/docs/**/*.md
+*.notes.md

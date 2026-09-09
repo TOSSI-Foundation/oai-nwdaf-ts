@@ -107,12 +107,44 @@ done
 echo "=== 7. every patch applies to its stated base ==="
 # The SMF patch was already checked above; do the rest, so a patch that silently
 # stopped matching upstream is caught here and not during a two-hour NF build.
+#
+# A patch is only really verified when the upstream clone it targets is on this
+# host. Where it is, apply --check it for real. Where it is not, say so as a SKIP
+# rather than printing a PASS that only means "the header parses" - this step
+# used to do the latter under a heading claiming the former.
+#
+# NRF patch 02 applies inside the src/common-src SUBMODULE, not the NRF repo, so
+# it needs its own target directory.
+upstream_for(){ case "$1" in
+  patches/deployment/*) echo "${FED_UPSTREAM:-${FED_DIR:-$HOME/oai-cn5g-fed}}";;
+  patches/pcf/*) echo "${PCF_UPSTREAM:-$HOME/oai-src/oai-cn5g-pcf}";;
+  patches/nrf/02-*) echo "${NRF_UPSTREAM:-$HOME/oai-src/oai-cn5g-nrf}/src/common-src";;
+  patches/nrf/*) echo "${NRF_UPSTREAM:-$HOME/oai-src/oai-cn5g-nrf}";;
+  patches/smf/*) echo "${SMF_UPSTREAM:-$HOME/oai-src/oai-cn5g-smf}";;
+  *) echo "";; esac; }
+
 for pf in "$R"/patches/*/[0-9]*.patch; do
   rel=${pf#$R/}
   base=$(grep -oP '^# Base\s+:\s+\K[0-9a-f]{40}' "$pf" 2>/dev/null)
   [ -n "$base" ] || { no "$rel has no '# Base' commit in its header"; continue; }
   case "$rel" in patches/smf/01-*) continue;; esac   # done in step 4
-  ok "$rel declares base ${base:0:12}"
+  UPD=$(upstream_for "$rel")
+  if [ -z "$UPD" ] || [ ! -e "$UPD/.git" ]; then
+    echo "  SKIP  $rel declares base ${base:0:12} (no upstream clone to check against)"
+    continue
+  fi
+  # Verify against the stated base in a throwaway worktree, so a dirty or
+  # already-patched upstream checkout cannot change the answer.
+  W="$TMP/p$$-$(echo "$rel" | tr / _)"
+  if git clone --quiet --no-checkout "$UPD" "$W" 2>/dev/null \
+     && git -C "$W" checkout --quiet "$base" 2>/dev/null; then
+    git -C "$W" apply --check "$pf" 2>"$TMP/ap7.log" \
+      && ok "$rel applies to ${base:0:12}" \
+      || { no "$rel does NOT apply to ${base:0:12}"; head -3 "$TMP/ap7.log" | sed 's/^/        /'; }
+  else
+    echo "  SKIP  $rel declares base ${base:0:12} (base commit not in $UPD)"
+  fi
+  rm -rf "$W"
 done
 
 echo "=== 8. no machine-specific absolute paths ==="
@@ -175,6 +207,6 @@ echo
 echo "=============================================="
 echo "  $PASS passed, $FAIL failed"
 echo "  NOT covered: runtime steering behaviour."
-echo "  That needs the lab - see docs/MULTI-UE-STEERING.md."
+echo "  That needs the lab - see README.md sections 7 and 8."
 echo "=============================================="
 [ $FAIL -eq 0 ]
