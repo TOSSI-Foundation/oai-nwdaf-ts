@@ -85,19 +85,12 @@ reason the PCF is a required component rather than an optional one.
 
 ## Architecture
 
-<!--
-  ARCHITECTURE FIGURE - placeholder.
 
-  Add the figure here with a line such as:
+![System architecture: NWDAF-driven DNAI traffic steering on OAI 5G SA](docs/architecture.png)
 
-      ![System architecture](docs/architecture.png)
+*Figure A — Implemented system architecture. `MOD` marks an upstream OAI component
+patched here, `NEW` a component written for this project, `LAB` test scaffolding.*
 
-  The image is intentionally NOT part of this repository yet; it is added
-  separately. Note that .gitignore excludes Markdown files under docs/ but not
-  images, so an image committed at docs/<name>.png will be tracked normally.
--->
-
-> **Architecture figure:** *to be added here.*
 
 ### Components
 
@@ -1063,7 +1056,26 @@ does not demonstrate what it appears to.
 make logs
 ```
 
-This follows the SMF and filters for the decision lines. You are looking for:
+`make logs` is a shortcut. To read the SMF log directly — useful in a second
+terminal, or when you want to change the filter — run the command it wraps:
+
+```bash
+sudo docker logs -f oai-smf 2>&1 | grep --line-buffered -E \
+  "Steering cycle:|per-session decision|Steering: Update|dnai="
+```
+
+`--line-buffered` matters: without it `grep` buffers its output and the lines
+arrive in bursts long after the event, which makes a live steer impossible to
+follow. Drop the pipe entirely (`sudo docker logs -f oai-smf`) to see everything.
+
+For the log so far rather than a live follow, replace `-f` with `--since`:
+
+```bash
+sudo docker logs --since 5m oai-smf 2>&1 | grep -E \
+  "Steering cycle:|per-session decision|Steering: Update|dnai="
+```
+
+Either way, you are looking for:
 
 | Log line | What it tells you |
 |---|---|
@@ -1072,9 +1084,17 @@ This follows the SMF and filters for the decision lines. You are looking for:
 | `Steering cycle: N eligible session(s), M steered` | How many were eligible and how many actually moved |
 | `Steering: Update FAR … -> network instance '…'` | The PFCP change it pushed to the UPF |
 
-If you see `HOLD: only one PCF-authorized DNAI`, the PCF authorized only one path for
-that subscriber and no steer is possible — this is a policy problem, not a steering
-problem.
+A `HOLD` line means the SMF evaluated the session and decided not to move it. The
+reason is printed after the arrow. The two you are most likely to see:
+
+| `HOLD` reason | What it means |
+|---|---|
+| `only one PCF-authorized DNAI (…)` | The PCF authorized a single path for that subscriber, so there is nothing to choose between. A policy problem, not a steering problem — check `policy_decisions/` and re-run `make ues`. |
+| `the UPF has not confirmed a DNAI for this session yet` | The SMF knows about the session but the UPF has not yet reported which DNAI it is forwarding on. Normal for a few seconds after a session starts. If it persists, the SMF and UPF have drifted apart — `make ues` resets both. |
+
+A steady stream of `HOLD` with healthy or `UNKNOWN` paths is the correct, safe
+behaviour, not a fault: the HEALTH rule only acts on a path it has observed to be
+degraded.
 
 ### 4. What the NWDAF actually measured
 
