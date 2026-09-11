@@ -191,6 +191,14 @@ path is carrying. It is *not* a measure of path quality.
 **How the preferred path is selected.** The SMF takes `argmax(avgTrafficRate)` over
 the DNAIs the PCF authorized for that session. The busiest path wins.
 
+**One extra gate, and it catches people out.** As deployed, the SMF asks for
+*predictions* (`SMF_NWDAF_PREDICT_SEC=60`), and drops any DNAI whose Confidence is
+below `SMF_NWDAF_MIN_CONFIDENCE` — **50 by default**. Confidence only builds as the
+300-second analytics window fills, so RATE does nothing for the first few minutes
+after traffic starts. Setting `SMF_NWDAF_PREDICT_SEC=0` asks for statistics
+instead, which carry no Confidence, so the gate never applies. HEALTH has no
+equivalent gate.
+
 **Consequences, stated plainly:**
 
 * It steers **toward** the busier path, not away from a congested one.
@@ -267,6 +275,7 @@ zero. It is a transmit-stall indicator specific to this VPP-on-veth setup, it is
 | Reversible | No — one-way ratchet | Yes |
 | Detection window | 300 s average | 5 s interval |
 | Needs impairment to demonstrate | No | Yes |
+| Extra gate before it can act | **Confidence ≥ `SMF_NWDAF_MIN_CONFIDENCE` (50)**, unless `SMF_NWDAF_PREDICT_SEC=0` | None — health is not a prediction and carries no Confidence |
 | Default | **Yes** | No |
 
 Choose **HEALTH** unless you are specifically demonstrating the original RATE
@@ -921,6 +930,40 @@ This test proves that the SMF ranks DNAIs by `avgTrafficRate` and moves sessions
 **toward** the busier path. That is the documented RATE behaviour, and a rule that
 quietly stopped doing it would be a regression.
 
+> ### Read this first: RATE is gated on Confidence ≥ 50 by default
+>
+> This is the single biggest reason a RATE run appears to hang.
+>
+> `start_core.sh` sets `SMF_NWDAF_PREDICT_SEC=60`, which makes the SMF ask the
+> NWDAF for **predictions**. Every prediction carries a Confidence value, and the
+> SMF discards any DNAI whose Confidence is below `SMF_NWDAF_MIN_CONFIDENCE`,
+> **which defaults to 50**. Confidence only rises as the 300-second analytics
+> window fills — measured at **39 one minute** after traffic starts and crossing
+> **50 at about five minutes** — so for the first few minutes *every* DNAI is
+> rejected, nothing is ranked, and the preference never changes.
+>
+> **Start the core like this and the gate never applies:**
+>
+> ```bash
+> SMF_NWDAF_PREDICT_SEC=0 make core RULE=RATE
+> ```
+>
+> `0` selects **statistics** instead of predictions. Statistics carry no
+> Confidence at all, and the SMF only applies the floor to values that have one
+> (`if (p.has_confidence && p.confidence < m_min_confidence)`), so the floor is
+> skipped entirely and RATE can act as soon as the two paths differ in rate.
+>
+> If you have already started the core with the default, you do not have to
+> restart: just keep the traffic running and re-run `make test-rate` after about
+> five minutes. `test-rate.sh` detects this case and prints
+> `NOTE: the SMF is currently REJECTING every DNAI - confidence N < floor 50`
+> rather than leaving you guessing.
+>
+> Confidence is **not monotonic** — measured rising 39 → 51 over ~5 minutes, then
+> decaying back to ~35 — so RATE has only a transient window in which it can act
+> when predictions are enabled. That is why `SMF_NWDAF_PREDICT_SEC=0` is the
+> reliable way to exercise it.
+
 ### The traffic shape RATE needs
 
 RATE compares offered load, so the test needs a **rate difference** between the two
@@ -998,14 +1041,9 @@ start on `internet-primary` again.
 
 Optional parameter: `make test-rate WAIT=300` (the default when run through `make`).
 
-> **Why `SMF_NWDAF_PREDICT_SEC=0`.** With the default of 60, the SMF asks the NWDAF
-> for *predictions*, which carry a Confidence value, and it discards any DNAI whose
-> Confidence is below `SMF_NWDAF_MIN_CONFIDENCE` (50). Confidence rises only as the
-> 300-second analytics window fills — measured at 39 one minute after traffic starts
-> and crossing 50 at around five minutes — so for the first few minutes **every** DNAI
-> is rejected and nothing is ranked. Setting it to `0` selects *statistics*, which
-> carry no Confidence at all, so the floor never applies. This is the reliable way to
-> exercise RATE. If you leave the default, simply keep the traffic running longer.
+> **`SMF_NWDAF_PREDICT_SEC=0` in step 1 is what removes the Confidence ≥ 50 gate.**
+> See the callout at the top of this section. Without it, expect to wait about five
+> minutes for Confidence to cross the floor.
 
 > **Be patient.** The engine averages `DN_PERFORMANCE` over 300 seconds, so the rate
 > separation has to build up before there is anything to rank. This is why the RATE
