@@ -160,20 +160,53 @@ fi
 # The NRF purge takes ~50 s, so a single immediate probe can pass on a PCF that
 # is about to vanish. Poll for up to ~64 s instead. On a correctly built PCF the
 # first probe succeeds and this costs nothing.
+#
+# Distinguish "the NRF says the PCF is absent" from "this host cannot reach the
+# NRF at all". An earlier version conflated them and blamed a missing PCF patch
+# whenever the probe came back empty - including when the real cause was that
+# host-to-container traffic was blocked, which is a completely different fix.
+NRF_URL="http://192.168.70.130:8080/nnrf-nfm/v1/nf-instances?nf-type=PCF"
+nrf_reachable=0; pcf_listed=0; probed_from=host
+# A successful query ALWAYS returns a JSON envelope - '{"_links":{"item":[],...}}'
+# when nothing is registered - so an empty body means the REQUEST failed, never
+# "the PCF is absent". Treat the two differently.
+#
+# If the host cannot reach the container network at all (firewall, nftables,
+# docker --iptables=false), fall back to probing from inside vpp-upf, which is
+# already up and healthy by this point and ships curl. That turns "unknown" into
+# a real answer instead of an alarming guess.
+probe_nrf(){ curl --http2-prior-knowledge -s -m 5 "$NRF_URL" 2>/dev/null; }
+probe_nrf_incontainer(){ sudo docker exec vpp-upf curl --http2-prior-knowledge -s -m 5 "$NRF_URL" 2>/dev/null; }
 for _ in $(seq 8); do
-  n=$(curl --http2-prior-knowledge -s -m 5 \
-      "http://192.168.70.130:8080/nnrf-nfm/v1/nf-instances?nf-type=PCF" \
-      | grep -c '"href"' 2>/dev/null)
-  [ "${n:-0}" -gt 0 ] && break
+  body=$(probe_nrf)
+  if [ -z "$body" ]; then body=$(probe_nrf_incontainer); [ -n "$body" ] && probed_from="vpp-upf"; fi
+  if [ -n "$body" ]; then
+    nrf_reachable=1
+    case "$body" in *'"href"'*) pcf_listed=1;; esac
+    [ "$pcf_listed" = 1 ] && break
+  fi
   sleep 8
 done
-if [ "${n:-0}" -gt 0 ]; then
+[ "$probed_from" = host ] || echo "      note: the host could not reach the NRF; probed from inside vpp-upf instead"
+if [ "$pcf_listed" = 1 ]; then
   echo "      ok: registered in the NRF"
+elif [ "$nrf_reachable" = 0 ]; then
+  # Not a PCF fault, and saying so would send someone into a two-hour rebuild.
+  echo "      WARNING: could not reach the NRF at 192.168.70.130:8080 FROM THIS HOST,"
+  echo "               so whether the PCF registered is unknown. This is usually a"
+  echo "               host-to-container networking problem (firewall, nftables, or"
+  echo "               docker --iptables=false), NOT a PCF problem. Check with:"
+  echo "                 curl --http2-prior-knowledge -s '$NRF_URL'"
+  echo "                 sudo docker logs oai-nrf --tail 20"
+  pcf_rc=1
 else
-  echo "      WARNING: the PCF is NOT registered in the NRF."
-  echo "               Most likely it was built without patches/pcf/02-nrf-heartbeat.patch,"
-  echo "               so the NRF purged its profile. Nothing will be authorized to steer."
-  echo "               Rebuild with BOTH pcf patches:  ./scripts/build.sh nfs"
+  echo "      WARNING: the NRF answered, but lists no PCF."
+  echo "               Most likely the PCF was built without patches/pcf/02-nrf-heartbeat.patch,"
+  echo "               so the NRF purged its profile ~50 s after start. Nothing will be"
+  echo "               authorized to steer. What the PCF itself logged about registering:"
+  sudo docker logs oai-pcf 2>&1 | grep -iE 'regist|nrf' | tail -3 | sed 's/^/                 /'
+  echo "               If it says registration succeeded, patch 02 is the missing piece:"
+  echo "                 ./scripts/build.sh nfs"
   pcf_rc=1
 fi
 

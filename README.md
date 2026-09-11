@@ -479,8 +479,36 @@ and no database is written.** It is safe to run even while a deployment is live.
 | **SKIP** | The check could not run because something optional is not on this machine — for example step 2 needs a cached SMF builder image that only exists after a full network-function build. **A SKIP is not a failure** and the run still exits zero. |
 | **INFO** | Advisory. Step 10 reports images you have not built yet this way. |
 
-On a fresh machine, expect several SKIPs. After a complete build, expect
-`23 passed, 0 failed`.
+### Expected results
+
+The number of checks that can run depends on how much you have built, so compare
+against the right line:
+
+| Situation | Expected result |
+|---|---|
+| **Fresh clone**, nothing built yet | `13 passed, 0 failed` — with 7 SKIPs and 2 INFOs |
+| After the fast builds (`build-nwdaf`, `build-gnbsim`, `build-fed`) | `16 passed, 0 failed` — `build-fed` clones `oai-cn5g-fed`, which satisfies step 11 and lets step 7 check the deployment patch |
+| **After a complete build**, including `make build-nfs` | `23 passed, 0 failed` |
+
+**`0 failed` is the only number that must be zero.** On a fresh clone these seven
+SKIPs are all expected, and all have the same cause — the upstream sources and the
+built images do not exist on the machine yet:
+
+| Step | SKIP on a fresh clone because |
+|---|---|
+| 2 — SMF C++ compiles | Needs the cached SMF builder image, which only exists after `make build-nfs` |
+| 4 — SMF patch applies | Needs the upstream SMF clone at `$HOME/oai-src/oai-cn5g-smf`; set `SMF_UPSTREAM` to point elsewhere |
+| 7 — the other five patches | Same reason: no upstream PCF, NRF or `oai-cn5g-fed` clone to check against |
+
+The two INFO lines are advisory, not problems:
+
+| Step | INFO on a fresh clone |
+|---|---|
+| 10 — required image tags | Lists the images you have not built yet |
+| 11 — external prerequisites | `oai-cn5g-fed` is not cloned yet; `make build-fed` does it |
+
+`make build-nfs` creates the upstream clones as a side effect, which is why all
+seven SKIPs become PASSes after a full build.
 
 ### What it does not check
 
@@ -917,14 +945,56 @@ make nwdaf
 # 3. A small topology is easiest to reason about: 2 steerable + 1 anchor.
 make ues UES=3 ANCHORS=1
 
-# 4. Start traffic on every UE, then stop it on the steerable ones so that only
-#    the anchor (the highest-numbered container) keeps sending.
-make load MBPS=60 SECS=1800 PROTO=udp
-for c in gnbsim-vpp2 gnbsim-vpp3; do sudo docker exec $c pkill iperf3; done
+# 4. CHECK THE STARTING PLACEMENT BEFORE LOADING ANYTHING.
+#    The 2 steerable UEs must be on internet-primary and the anchor on
+#    internet-secondary. If they are all on one path already, stop and read
+#    "If every session already starts on one path" below - the test cannot pass.
+make status
 
-# 5. Let the rate difference build, then run the test.
+# 5. Start traffic on every UE, then stop it on the steerable ones so only the
+#    anchor keeps sending. The anchor is the LAST container, so derive the list
+#    rather than hard-coding names that only hold for UES=3.
+make load MBPS=60 SECS=1800 PROTO=udp
+for c in $(sudo docker ps --format '{{.Names}}' --filter name=gnbsim-vpp \
+           | sort -V | head -n -1); do sudo docker exec $c pkill iperf3; done
+
+# 6. Let the rate difference build, then run the test.
 make test-rate
 ```
+
+#### If every session already starts on one path
+
+`make status` right after step 4 should show the steerable UEs on
+`internet-primary`. If they are **already** on `internet-secondary`, the RATE
+test will stop with:
+
+```
+FAIL  all N sessions are already on internet-secondary - there is no second path
+      to compare
+RESULT: FAIL (degenerate topology)
+```
+
+That is the test refusing to report a pass it cannot justify, not a fault in the
+deployment. There are two causes, and they need different fixes:
+
+**Stale analytics from a previous run.** `make clean` deliberately keeps the
+MongoDB volume, so usage history survives. The engine averages over 300 seconds,
+so a fresh core can read a rate from the *previous* test, rank on it, and steer
+every session before you have generated any traffic at all. Either wait for both
+paths to report `0 bps` before resetting, or clear the usage history:
+
+```bash
+# Deletes the collected usage reports. The per-DNAI telemetry in upf_metrics is
+# left alone. Only do this when you do not need the history.
+sudo docker exec oai-nwdaf-database mongosh --quiet --eval \
+  'db.getSiblingDB("testing").smf.deleteMany({})'
+make ues UES=3 ANCHORS=1
+```
+
+**The RATE ratchet.** RATE only moves sessions toward the busier path, so once
+everything has converged there is no way back. `make ues` is the reset: it
+restarts the UPF, SMF and PCF and re-attaches every UE, so the steerable sessions
+start on `internet-primary` again.
 
 Optional parameter: `make test-rate WAIT=300` (the default when run through `make`).
 
@@ -1005,7 +1075,8 @@ make unsteer
 
 SMF_NWDAF_PREDICT_SEC=0 make core RULE=RATE && make nwdaf && make ues UES=3 ANCHORS=1
 make load
-for c in gnbsim-vpp2 gnbsim-vpp3; do sudo docker exec $c pkill iperf3; done
+for c in $(sudo docker ps --format '{{.Names}}' --filter name=gnbsim-vpp \
+           | sort -V | head -n -1); do sudo docker exec $c pkill iperf3; done
 make test-rate
 ```
 
@@ -1135,6 +1206,7 @@ Every entry below is a failure that has actually occurred in this project.
 | `sudo: docker-compose: command not found` | Neither compose generation is installed; `docker.io` does not include one | `sudo apt install -y docker-compose-plugin` |
 | Permission denied talking to the Docker socket | The commands need `sudo` | Run with `sudo` rights; the scripts already call `sudo docker` |
 | The host pollers never start; `pgrep` finds nothing | `sudo -n` failed because sudo wants a password | Configure passwordless `sudo`, then re-run `make nwdaf` and read `.collector.log` |
+| `make nwdaf` stops at `FAILED: python3 -m venv` | `python3-venv` is not installed; the collector needs a virtualenv for `pymongo` | `sudo apt install -y python3-venv`, then re-run `make nwdaf` — it skips the containers that are already up |
 | `KeyError: 'ContainerConfig'` and the container is already dead | docker-compose **v1** on a locally-built image — it kills the container before failing | Use the v2 plugin |
 | `dial tcp [2600:9000:…]:443: network is unreachable` while pulling | DNS returned an IPv6 address for Docker Hub and the host has no IPv6 route | Retry; if it persists, `sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1 && sudo systemctl restart docker` |
 
@@ -1164,7 +1236,8 @@ Every entry below is a failure that has actually occurred in this project.
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| **PCF absent from the NRF**, but it logged `NF registration successful` | Built without `patches/pcf/02-nrf-heartbeat.patch`; the NRF purged its profile ~50 s after start | Rebuild the PCF with **both** patches |
+| `make core` says **could not reach the NRF … FROM THIS HOST** | Not a PCF fault: host-to-container traffic is blocked (firewall, nftables, or Docker started with `--iptables=false`) | Check `curl --http2-prior-knowledge -s "http://192.168.70.130:8080/nnrf-nfm/v1/nf-instances?nf-type=PCF"` and `sudo docker logs oai-nrf --tail 20` before rebuilding anything |
+| `make core` says **the NRF answered, but lists no PCF** | The PCF was built without `patches/pcf/02-nrf-heartbeat.patch`; the NRF purged its profile ~50 s after start | Rebuild the PCF with **both** patches: `make build-nfs` |
 | AMF absent from the NRF, and its file-descriptor table fills up | `patches/nrf/02-namf-communication-alias.patch` was not applied **inside `src/common-src`** | It is a submodule — apply it from there |
 | NWDAF absent from the NRF | The analytics NBI is not running, or registration has not completed | Check `oai-nwdaf-nbi-analytics` logs; `start_nwdaf.sh` polls for 60 s |
 
@@ -1436,8 +1509,8 @@ window fills.
 
 ## Quick Start
 
-For someone who already has the [prerequisites](#prerequisites) installed. Building
-the C++ network functions takes hours on a first run.
+For someone who already has the [prerequisites](#prerequisites) installed.
+Compiling the C++ network functions takes hours on a first run.
 
 ```bash
 # clone
@@ -1447,11 +1520,11 @@ cd oai-nwdaf-traffic-steering
 # verify
 make verify
 
-# build            (build-nfs is the slow one - hours)
-make build-nwdaf
-make build-gnbsim
-make build-fed
-make build-nfs
+# build
+make build-nwdaf      # ~2 minutes
+make build-gnbsim     # seconds
+make build-fed        # minutes
+make build-nfs        # SMF, PCF, NRF - 30-120 min EACH
 
 # deploy
 make core RULE=HEALTH
@@ -1459,6 +1532,8 @@ make nwdaf
 
 # create UEs and traffic
 make ues UES=5 ANCHORS=1
+make status
+
 make load MBPS=60 SECS=1800 PROTO=udp
 
 # run the HEALTH test
@@ -1468,9 +1543,12 @@ make unsteer
 # run the RATE test - it needs its own core and a different traffic shape
 SMF_NWDAF_PREDICT_SEC=0 make core RULE=RATE
 make nwdaf
+
 make ues UES=3 ANCHORS=1
+make status
 make load MBPS=60 SECS=1800 PROTO=udp
-for c in gnbsim-vpp2 gnbsim-vpp3; do sudo docker exec $c pkill iperf3; done
+for c in $(sudo docker ps --format '{{.Names}}' --filter name=gnbsim-vpp \
+           | sort -V | head -n -1); do sudo docker exec $c pkill iperf3; done
 make test-rate
 
 # tear down

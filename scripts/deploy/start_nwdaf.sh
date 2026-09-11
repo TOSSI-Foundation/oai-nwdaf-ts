@@ -96,11 +96,32 @@ echo "──── host pollers ────"
 # completely silent - and with no collector there is no path health at all, every
 # DNAI reads UNKNOWN and the HEALTH rule never steers. Build a venv, then CHECK.
 VENV=${VENV:-$HERE/.venv}
-if [ ! -x "$VENV/bin/python3" ]; then
-  echo "   creating $VENV"
-  python3 -m venv "$VENV" >/dev/null 2>&1 || { echo "   FAILED: python3 -m venv (apt install python3-venv)"; exit 1; }
-  "$VENV/bin/pip" install -q -r "$HERE/scripts/telemetry/requirements.txt" \
+# Check the interpreter and the DEPENDENCY separately, and repair a half-built
+# venv rather than trusting it.
+#
+# Why: on Debian/Ubuntu without python3-venv installed, `python3 -m venv` creates
+# bin/python3 and THEN fails at the ensurepip step. An earlier version guarded
+# the whole block with `[ ! -x "$VENV/bin/python3" ]`, so the retry after
+# `apt install python3-venv` saw that leftover interpreter, skipped the block
+# entirely - pip install included - and the collector then died on
+# `ModuleNotFoundError: No module named 'pymongo'`, which looks nothing like the
+# original error.
+have_deps(){ "$VENV/bin/python3" -c 'import pymongo' >/dev/null 2>&1; }
+if ! have_deps; then
+  # A venv with no working pip cannot be repaired in place; rebuild it.
+  if [ ! -x "$VENV/bin/python3" ] || ! "$VENV/bin/python3" -m pip --version >/dev/null 2>&1; then
+    echo "   (re)creating $VENV"
+    rm -rf "$VENV"
+    python3 -m venv "$VENV" >/dev/null 2>&1 || {
+      echo "   FAILED: python3 -m venv"
+      echo "           install it with:  sudo apt install -y python3-venv"; exit 1; }
+  fi
+  echo "   installing scripts/telemetry/requirements.txt into $VENV"
+  "$VENV/bin/python3" -m pip install -q -r "$HERE/scripts/telemetry/requirements.txt" \
     || { echo "   FAILED: pip install -r scripts/telemetry/requirements.txt"; exit 1; }
+  # Never assume the install worked - this is the exact thing that failed before.
+  have_deps || { echo "   FAILED: pymongo still not importable from $VENV"
+                 echo "           try:  rm -rf $VENV && make nwdaf"; exit 1; }
 fi
 if pgrep -f '[c]ollect_upf_metrics.py' >/dev/null; then
   echo "   already running: telemetry collector"
