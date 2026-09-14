@@ -70,7 +70,7 @@
  * -----------------------------------------------------------------------------
  * A usage report is attributed to a DNAI by TIME, within the SUPI's document.
  * It cannot be attributed per PDU session because QOS_MON notifications from
- * the OAI SMF carry pduSeId = 0 (verified live across 1216 stored reports): the
+ * the OAI SMF carry pduSeId = 0 (observed across every stored report): the
  * QoS-monitoring path is keyed on the PFCP SEID and the SMF's own source says
  * "TODO: use SCID and access PDU Session ID (need binding SCIDs - PDUSessID)".
  * CLASSIFICATION: OAI implementation gap.
@@ -156,7 +156,7 @@ type ratePoint struct {
 // deliberately the simplest thing that can be explained in one sentence and
 // audited from the logs. It is NOT a trained model, and it is unrelated to the
 // XGBoost model behind the custom TRAFFIC_STEERING_UPF_LOAD analytic - the two
-// tracks stay separate (PROJECT-HISTORY 17.13).
+// tracks stay separate.
 //
 // THE CONFIDENCE, stated so nobody mistakes it for something it is not:
 //   * it rises with the NUMBER of contributing reports, because two points can
@@ -505,7 +505,7 @@ func dnPerformance(w http.ResponseWriter, r *http.Request) {
 						"PFCP seids contributed to %d different DNAIs inside the "+
 						"window, and QOS_MON carries pduSeId=0, so reports were "+
 						"attributed by time alone and some may be on the wrong "+
-						"path (PROJECT-HISTORY 18.7). Benign if these seids are "+
+						"path. Benign if these seids are "+
 						"successive sessions of one UE; wrong if they are "+
 						"concurrent.",
 					result["_id"], len(seidsSeen), len(dnaisAssigned))
@@ -719,11 +719,11 @@ func sessionIdentity(raw interface{}) (string, int32, string) {
 //
 // The two sources are deliberately NOT merged into one number. PerfData keeps
 // its usage-report meaning; path health is published beside it under a
-// vendor-prefixed key. See PROJECT-HISTORY 29.
+// vendor-prefixed key.
 
 // dnPerfHealthMaxAgeSec - how old a dnaiPerf sample may be and still be used.
 //
-// ⚠️ FRESHNESS WAS NOT PREVIOUSLY DEFINED FOR upf_metrics. `applyDefaultRecentWindow`
+// FRESHNESS WAS NOT PREVIOUSLY DEFINED FOR upf_metrics. `applyDefaultRecentWindow`
 // (300 s, used by NF_LOAD) is an ANALYTICS WINDOW - the period to average over -
 // not a staleness bound, and reusing it here would be wrong: the poller samples
 // every 5 s, so a 300 s old health sample says nothing about the path now.

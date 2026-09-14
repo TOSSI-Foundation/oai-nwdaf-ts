@@ -13,7 +13,7 @@
 # create -> connect BOTH networks -> start (the second network must be attached
 # before the process runs, or GTPuLocalAddr does not exist yet).
 #
-# WHY THIS IS A TABLE AND NOT A FORKED SCRIPT (PROJECT-HISTORY section 23)
+# WHY THIS IS A TABLE AND NOT A FORKED SCRIPT
 # The second UE was originally created by copying this file and editing three
 # values, and shipped with GNBID=5 - IDENTICAL to gnbsim-vpp2. GNBID is the
 # Global gNB ID: two gNBs presenting the same one are one gNB re-registering as
@@ -117,7 +117,7 @@ docker create --name "$NAME" --privileged \
   `# broken pipe. It is silent: nothing warns, and the failure surfaces` \
   `# wherever the harness happened to be, an hour after the real cause.` \
   `# It cost repeats 2 and 3 of the first successful measurement run` \
-  `# (PROJECT-HISTORY 22.3). A day is longer than any test session here.` \
+  `# A day is longer than any test session here.` \
   -e DEREG_AFTER="${DEREG_AFTER:-86400}" \
   -e RANUENGAPID="$RANUENGAPID" -e USE_FQDN=no \
   -e NGAPPeerAddr=192.168.70.132 \

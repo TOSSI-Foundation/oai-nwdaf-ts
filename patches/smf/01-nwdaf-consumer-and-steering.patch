@@ -249,7 +249,7 @@ index eace696..0ae24a1 100644
 +  // smf.h - already handled by session_update_sm_context_procedure on both the
 +  // N4 request and N4 response paths - not a 3GPP procedure name.
 +  //
-+  // See docs/smf-self-trigger-design.md.
++  // It is an SMF-internal self-trigger.
 +  if (smreq->session_procedure_type ==
 +      session_management_procedures_type_e::
 +          PDU_SESSION_MODIFICATION_SMF_REQUESTED) {
@@ -286,7 +286,7 @@ index eace696..0ae24a1 100644
 +      // before sending the request. That check ran on the consumer's own thread
 +      // at decision time; THIS one runs on TASK_SMF_APP at execution time,
 +      // against the policy as it stands NOW. Between the two the PCF may have
-+      // revoked or narrowed the authorization - PROJECT-HISTORY §14.3, "never
++      // revoked or narrowed the authorization; the rule is "never
 +      // use revoked authorization". This is the check that counts.
 +      const auto by_precedence = get_authorized_dnais(sp->policy_ptr->decision);
 +      if (by_precedence.empty()) {
@@ -387,7 +387,7 @@ index eace696..0ae24a1 100644
 +      if (json_data.find("smPolicyDecision") != json_data.end()) {
 +        const auto& decision = json_data["smPolicyDecision"];
 +
-+        // 🐛 FIX (2026-08-26): keep the SESSION'S STORED POLICY CURRENT.
++        // Keep the SESSION'S STORED POLICY CURRENT.
 +        //
 +        // policy_association::decision is written when the association is
 +        // created, and on an SMF-INITIATED update or GET (smf_n7.cpp) - and
@@ -550,8 +550,8 @@ index eace696..0ae24a1 100644
 +    //
 +    // It used to fire at this point - when the SMF committed the change to the
 +    // session graph, BEFORE the N4 update was even sent - which meant the NWDAF
-+    // was told about a path change the UPF might reject. PROJECT-HISTORY 18.2
-+    // recorded that as an honest limitation. It is now emitted from the N4
++    // was told about a path change the UPF might reject. That was an honest
++    // limitation of that placement. It is now emitted from the N4
 +    // Session Modification RESPONSE handler in smf_procedure.cpp, once the UPF
 +    // has acknowledged the change, alongside confirm_n6_state().
 +    // steer_source_dnai / steer_target_dnai are kept for the log line above.
@@ -1484,7 +1484,7 @@ index b6babe1..40f7c6a 100644
 +      // BOTH PFCP rules of that N6 edge must be updated. This was established
 +      // empirically: updating only the FAR moves egress to the new N6 instance
 +      // but leaves the downlink PDR matching on the old one, so return traffic
-+      // matches no PDR and is silently dropped. See PROJECT-HISTORY.md 10.9.
++      // matches no PDR and is silently dropped.
 +      //
 +      // Both rules live on the SAME edge. select_upf_nodes() marks every N6
 +      // edge uplink = true, so an N6 edge lands in ul_edges and owns
@@ -1554,7 +1554,7 @@ index b6babe1..40f7c6a 100644
 +    // the UPF last acknowledged. Without this the control plane keeps claiming
 +    // a DNAI the UPF never accepted, and every later "am I already there?"
 +    // check is made against that fiction - the session is then never retried
-+    // and never corrected. See PROJECT-HISTORY 19.7 item 1.
++    // and never corrected.
 +    if (sps && sps->get_session_handler() &&
 +        sps->get_session_handler()->get_session_graph()) {
 +      if (sps->get_session_handler()
@@ -1633,8 +1633,8 @@ index b6babe1..40f7c6a 100644
 +      // only now report it on TS 29.508 UP_PATH_CH.
 +      //
 +      // Reporting moved here from smf_context.cpp, where it fired when the SMF
-+      // decided rather than when the UPF agreed - PROJECT-HISTORY 18.2 recorded
-+      // that as an honest limitation. An NWDAF that attributes traffic to a
++      // decided rather than when the UPF agreed, which was an honest
++      // limitation of that placement. An NWDAF that attributes traffic to a
 +      // DNAI must be told what the UPF is actually doing, not what the SMF
 +      // hoped it would do.
 +      if (sps && sps->get_session_handler() &&
@@ -1685,8 +1685,8 @@ index 70e424b..ebc9291 100644
 +  // a PFCP update that failed or never arrived left the control plane claiming
 +  // one DNAI while the UPF forwarded on another - permanently, because every
 +  // "am I already there?" check read the intent and concluded there was nothing
-+  // to do. That is PROJECT-HISTORY 19.7 item 1, and 19.3 defect 3 was that exact
-+  // failure mode made visible.
++  // to do. The confirmed-state distinction below exists to prevent that exact
++  // failure mode.
 +  //
 +  // Rule of thumb: policy decisions read the INTENT (that is what was chosen),
 +  // damping and reporting read the CONFIRMED state (that is what is true).

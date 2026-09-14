@@ -11,7 +11,7 @@
 #
 # WHAT IT DOES NOT PROVE. That the steer was optimal, or that the path health
 # signal is packet loss. It is an AF_PACKET transmit-stall indicator specific to
-# this VPP-on-veth lab. See README.md section 7.
+# this VPP-on-veth lab. See README.md.
 #
 # PREREQUISITES, all checked before anything is impaired:
 #   * the core, the NWDAF stack and >=2 UEs are up   (make core / nwdaf / ues)

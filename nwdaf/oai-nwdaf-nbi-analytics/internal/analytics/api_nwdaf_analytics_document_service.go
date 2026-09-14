@@ -78,7 +78,7 @@ type NfLoadResp struct {
 	NfType       string `json:"nfType"`
 	NfInstanceId string `json:"nfInstanceId"`
 	// No omitempty: 0 is a valid load reading and must stay distinguishable
-	// from "no reading". See PROJECT-HISTORY 14.5.
+	// from "no reading".
 	NfCpuUsage         int32 `json:"nfCpuUsage"`
 	NfMemoryUsage      int32 `json:"nfMemoryUsage"`
 	NfLoadLevelAverage int32 `json:"nfLoadLevelAverage"`

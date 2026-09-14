@@ -3,13 +3,11 @@
  */
 
 /*
- * Offline tests for the DN_PERFORMANCE aggregation, per
- * docs/dn-performance-design.md section 8.1.
+ * Offline tests for the DN_PERFORMANCE aggregation.
  *
  * These cover the pure logic - the DNAI-interval join, the usage-report
  * de-duplication key, the "omit, never zero" rule and the rate maths. The HTTP
- * handler itself needs MongoDB and is exercised by
- * scripts/nwdaf_consumer_test.py instead.
+ * handler itself needs MongoDB and is not covered here.
  *
  * Run:  go test ./internal/engine/
  */
@@ -515,8 +513,8 @@ func TestPredictionNeverExceedsObservedMaximum(t *testing.T) {
 
 // ---------------------------------------------------------------------------
 // ENGINE_DN_PERFORMANCE_WINDOW_SEC - the default analytics window is
-// configurable because it dominates closed-loop reaction latency
-// (PROJECT-HISTORY 22). Three properties matter and are asserted here:
+// configurable because it dominates closed-loop reaction latency. Three
+// properties matter and are asserted here:
 // the shipped default is unchanged at 300 so an unset variable changes no
 // behaviour; a configured value is honoured; and a non-positive value falls
 // back to 300 rather than being read as "no bound", which would reintroduce

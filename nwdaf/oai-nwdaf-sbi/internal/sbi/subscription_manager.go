@@ -21,17 +21,16 @@
  * InitConfig() called amfEventSubscription() and smfEventSubscription() ONCE,
  * synchronously, at startup:
  *
- *   1. NO RETRY. The AMF subscription timed out at 2026-08-21 10:13:59 with
- *      "dial tcp 192.168.70.132:8080: i/o timeout" and was never attempted
- *      again. The `amf` collection was therefore never created in four days of
- *      uptime, and UE_MOBILITY plus NETWORK_PERFORMANCE had no data at all.
- *      The AMF was reachable again minutes later.
+ *   1. NO RETRY. A subscription attempt that failed - for example an AMF that
+ *      was briefly unreachable at startup - was never retried. The `amf`
+ *      collection was then never created, and UE_MOBILITY plus
+ *      NETWORK_PERFORMANCE had no data at all, indefinitely.
  *
  *   2. NO RECOVERY. The SMF subscription succeeded, then the SMF restarted.
  *      Event-exposure subscriptions live in the SMF's memory, so it silently
- *      forgot ours. The last stored notification is 2026-08-21 11:14:07 - the
- *      `smf` collection has been stale ever since, which in turn zeroed every
- *      SMF-derived analytic AND the custom traffic-steering feature vector.
+ *      forgot ours. Notifications then stop for good and the `smf` collection
+ *      goes stale, which in turn zeroes every SMF-derived analytic AND the
+ *      custom traffic-steering feature vector.
  *
  *   3. NO UNSUBSCRIBE, so every restart of THIS component added a duplicate
  *      subscription to a still-running peer. The SMF then delivered each
@@ -68,12 +67,12 @@
  *        /namf-evts/v1/subscriptions/{subscriptionId}. TS 29.518 clause 5.2.2.4
  *        requires Namf_EventExposure_Unsubscribe.
  *
- * Verified live 2026-08-25. The delete-then-create and liveness logic below is
- * therefore CORRECT BUT INERT against these peers: it will start working the
- * moment either NF implements the resource, and it costs nothing meanwhile.
+ * The delete-then-create and liveness logic below is therefore CORRECT BUT
+ * INERT against these peers: it will start working the moment either NF
+ * implements the resource, and it costs nothing meanwhile.
  * The residual duplicate-subscription risk on restart is mitigated - NOT fixed -
  * by de-duplicating usage reports on their own (seid, urseqn) identity in
- * scripts/monitoring/collect_upf_metrics.py and in the engine handlers.
+ * scripts/telemetry/collect_upf_metrics.py and in the engine handlers.
  *
  * WHAT IT DELIBERATELY DOES NOT DO
  * -----------------------------------------------------------------------------
@@ -430,7 +429,7 @@ func createSubscription(peer string) (string, error) {
 // from the peer's 201 response.
 //
 // OAI UPSTREAM DEFECT - the Location headers these peers send are NOT valid
-// resource URIs, so this has to repair them. Measured 2026-08-25:
+// resource URIs, so this has to repair them. Observed forms:
 //
 //	SMF: "192.168.70.133/nsmf-event-exposure/v1/subscriptions2"
 //	     no scheme, no port, and the subscription id is CONCATENATED onto
@@ -607,7 +606,7 @@ func discoverPeerNfInstanceId(peer string) string {
 //
 // WHY THIS EXISTS. The OAI NFs generate a fresh nfInstanceId on every start and
 // never deregister, so the NRF accumulates REGISTERED profiles for one NF -
-// measured live: 18 SMF profiles, all REGISTERED, all on 192.168.70.133. The
+// for example 18 REGISTERED profiles for a single SMF, all on one address. The
 // discovery response is not ordered, so reading NfInstances[0] returns a
 // different id from one poll to the next WITHOUT the peer having restarted.
 //

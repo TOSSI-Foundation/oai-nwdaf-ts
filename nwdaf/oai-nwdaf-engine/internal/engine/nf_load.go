@@ -29,7 +29,7 @@
  * Table 6.5.2-1 sources NF resource usage from OAM (mean virtual CPU/memory/disk
  * per TS 28.552 clause 5.7) and NF load/status from the NRF. This engine instead
  * reads cgroup v2 accounting for the UPF container, collected out of band by
- * scripts/monitoring/collect_upf_metrics.py.
+ * scripts/telemetry/collect_upf_metrics.py.
  *
  * CLASSIFICATION: Deployment/test-environment workaround standing in for the OAM
  * source. It is NOT a specification violation in the narrow sense - TS 23.288

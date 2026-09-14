@@ -3,14 +3,14 @@
 # NOT collide with the traffic-steering deployment.
 #
 # WHY THIS EXISTS (configuration change, permanent for the steering scenario):
-# docker-compose-nwdaf-cn-*.yaml and scripts/recreate-manual-nwdaf.sh both put
+# The upstream OAI NWDAF compose files and helper scripts both put
 # oai-nwdaf-net on 192.168.74.0/24 - which is exactly the subnet
 # docker-compose-basic-vpp-pcf-steering.yaml uses for oai-public-core-sec, the
 # SECONDARY N6 network that Route 2 steers onto. Creating the NWDAF network as
 # shipped would either fail or break the steering path. This script uses
 # 192.168.75.0/24 instead; nothing else changes.
 #
-# WHAT IS STARTED (changed 2026-08-25, PROJECT-HISTORY §17)
+# WHAT IS STARTED
 # The custom closed loop needs four containers (database, traffic-steering
 # engine, nbi-events, sbi). The STANDARD NF_LOAD path the SMF consumes needs two
 # more - oai-nwdaf-engine and oai-nwdaf-nbi-analytics - so all six are started
@@ -23,7 +23,7 @@
 #     stale on every UPF restart.
 # Both are therefore attached to the control-plane network as well.
 #
-#   sudo ./scripts/nwdaf_stack_up.sh
+#   sudo ./scripts/deploy/nwdaf_stack_up.sh
 set -euo pipefail
 
 NET=oai-nwdaf-net
@@ -44,7 +44,7 @@ EVENTS_IMAGE=${EVENTS_IMAGE:-oai-nwdaf-nbi-events:$TAG}
 SBI_IMAGE=${SBI_IMAGE:-oai-nwdaf-sbi:$TAG}
 STEERING_IMAGE=${STEERING_IMAGE:-oai-nwdaf-engine-traffic-steering:latest}
 # DN_PERFORMANCE default analytics window, in seconds. This is the single
-# largest term in the closed-loop reaction latency (PROJECT-HISTORY §22), so it
+# largest term in the closed-loop reaction latency, so it
 # is exposed here for measurement. 300 is the shipping default and the value
 # that was hard-coded before it became configurable - leave it alone unless you
 # are deliberately trading statistical support for speed: a shorter window has
@@ -133,7 +133,7 @@ docker run -d --name oai-nwdaf-engine --network "$NET" --ip "${PFX}.155" \
   -e NF_LOAD_UPF_MEM_CAPACITY_BYTES=24000000000 \
   `# NF_LOAD_UPF_NF_INSTANCE_ID is deliberately UNSET - the NF Instance ID is` \
   `# resolved from the NRF. Setting it pins a value that goes stale on the` \
-  `# next UPF restart (PROJECT-HISTORY §17.1).` \
+  `# next UPF restart.` \
   -e NRF_URI="$NRF_URI" -e NRF_HTTP_VERSION=2 \
   -e NF_LOAD_UPF_NRF_FQDN=vpp-upf \
   -e NF_LOAD_UPF_NRF_REFRESH_SEC=30 \
@@ -168,7 +168,7 @@ fi
 # ---------------------------------------------------------------------------
 # LAST, and only ONCE, and only after AMF + SMF are healthy.
 #
-# Since 2026-08-25 (PROJECT-HISTORY §17.4) oai-nwdaf-sbi retries with backoff,
+# oai-nwdaf-sbi retries with backoff,
 # persists what it created, deletes it before subscribing again, and unsubscribes
 # on SIGTERM. BUT neither the OAI SMF nor the OAI AMF implements the Individual
 # Subscription resource, so that DELETE cannot succeed (§17.5). An extra start

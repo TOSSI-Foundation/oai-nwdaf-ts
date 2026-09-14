@@ -30,8 +30,7 @@
  * no NwdafInfo model: api_conv::profile_api_to_nrf_profile() stores no
  * nwdafInfo, so eventIds/nwdafEvents are accepted and silently dropped, and
  * per-Analytics-ID discovery filtering does not work against this NRF.
- * Discovery by NF type and by service name does work. See
- * docs/PROJECT-HISTORY.md.
+ * Discovery by NF type and by service name does work.
  */
 
 package analytics

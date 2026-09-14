@@ -125,7 +125,7 @@ type AbnorBehavrsResp struct {
 type NfLoadResp struct {
 	NfType       string `json:"nfType"`
 	NfInstanceId string `json:"nfInstanceId"`
-	// No omitempty: 0 is a valid load reading (PROJECT-HISTORY 14.5).
+	// No omitempty: 0 is a valid load reading.
 	NfCpuUsage         int32 `json:"nfCpuUsage"`
 	NfMemoryUsage      int32 `json:"nfMemoryUsage"`
 	NfLoadLevelAverage int32 `json:"nfLoadLevelAverage"`

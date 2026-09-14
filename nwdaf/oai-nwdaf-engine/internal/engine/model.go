@@ -251,12 +251,12 @@ type DnPerfEntry struct {
 
 // PathHealthResp - per-DNAI path health derived from UPF N6 interface counters.
 //
-// ⚠️ THIS IS NOT A 3GPP METRIC AND MUST NOT BE PRESENTED AS ONE.
+// THIS IS NOT A 3GPP METRIC AND MUST NOT BE PRESENTED AS ONE.
 // The JSON key is vendor-prefixed (`oaiPathHealthExt`) precisely so that no
 // consumer can mistake it for Table 6.14.3-1 output. In particular it is NOT
 // avgPacketLossRate: across every impairment measured, VPP interface `drops`,
 // Linux `tx_dropped` and `tx_errors` all stayed at exactly zero, so nothing
-// here counts a discarded packet (PROJECT-HISTORY 28.1).
+// here counts a discarded packet.
 //
 // What it measures is the fraction of transmit attempts on this DNAI's N6
 // interface that VPP could not hand to the kernel socket - AF_PACKET
@@ -270,7 +270,7 @@ type PathHealthResp struct {
 	// State is the whole point of this struct. UNKNOWN_* is NOT "healthy":
 	// an idle path makes no transmit attempt, so it CANNOT produce a failure,
 	// and an idle impaired path is byte-for-byte identical to an idle healthy
-	// one (measured, PROJECT-HISTORY 28.6). A consumer that reads absence of
+	// one (measured). A consumer that reads absence of
 	// failures as health will steer into a path it knows nothing about.
 	State string `json:"state"`
 	// SendtoFailurePerPacket is a POINTER so that UNKNOWN serialises as an

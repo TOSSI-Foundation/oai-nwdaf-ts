@@ -32,8 +32,8 @@ index b54f1d1..270487d 100644
 +      //
 +      // Only the type is set here. The generic nrf_profile has no nwdafInfo
 +      // member, so eventIds/nwdafEvents from the NF profile are still dropped
-+      // and per-Analytics-ID discovery filtering remains unsupported - see
-+      // docs/PROJECT-HISTORY.md. Discovery by NF type and by service name,
++      // and per-Analytics-ID discovery filtering remains unsupported.
++      // Discovery by NF type and by service name,
 +      // which is what clause 5.2 needs for NF-related analytics, now works.
 +      Logger::nrf_app().debug("\tNWDAF profile");
 +      profile.get()->set_nf_type(NF_TYPE_NWDAF);

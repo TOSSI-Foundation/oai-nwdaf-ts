@@ -18,7 +18,7 @@
 set -u
 HERE=$(cd "$(dirname "$0")/../.." && pwd)
 
-# 🔴 PIN THE IMAGE TAGS. nwdaf_stack_up.sh defaults to TAG=nwdaf-hardening, which
+# PIN THE IMAGE TAGS. nwdaf_stack_up.sh defaults to TAG=nwdaf-hardening, which
 # predates the path-health work:
 #   * a :nwdaf-hardening engine/analytics emits NO oaiPathHealthExt, so the HEALTH
 #     rule sees no health at all, every DNAI reads UNKNOWN, and NOTHING EVER

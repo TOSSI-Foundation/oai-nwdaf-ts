@@ -3,8 +3,8 @@
 """
 Make the Data Network's return path follow the DNAI a session is actually on.
 
-THE PROBLEM (PROJECT-HISTORY.md 24.4)
--------------------------------------
+THE PROBLEM
+-----------
 `upf_graph::apply_steering_dnai()` rebinds two things on a steer: the uplink FAR
 (egress network instance) and the downlink PDR's match instance. Nothing tells
 the DN to send the reply back on the *other* N6 interface. `oai-ext-dn` carries
@@ -31,7 +31,7 @@ That pair - (network instance, UE IP) - IS the rule return traffic has to
 satisfy. Driving the DN route from it means the route can never disagree with
 the dataplane, which is not true of driving it from the SMF's intent, from a log
 line, or from `uppathchlist` (all of which lead the UPF and can be wrong while a
-PFCP update is in flight, or after one has failed - see PROJECT-HISTORY 19.7).
+PFCP update is in flight, or after one has failed).
 
 Network instance -> N6 next hop comes from the UPF container's own environment
 (`IF_n_TYPE=N6`, `IF_n_NWI`, `IF_n_IP`), so the mapping is never hardcoded here
@@ -47,7 +47,7 @@ genuinely different networks. Nothing here is claimed as standards-compliant.
 
 It also does NOT change the UE address, and does not need to: because the route
 is keyed on the UE IP actually read from the UPF, the address-pool drift
-described in PROJECT-HISTORY 24.4 stops mattering. Fighting the allocator was
+described above stops mattering. Fighting the allocator was
 the wrong fix; making the return path address-agnostic is the right one.
 """
 

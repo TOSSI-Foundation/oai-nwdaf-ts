@@ -10,11 +10,11 @@
  * Every restart of oai-nwdaf-sbi used to add a NEW event-exposure subscription
  * to a still-running SMF without removing the previous one, so the SMF then
  * delivered each notification once per stale subscription and the IDENTICAL
- * usage report was stored N times. Measured live: same supi + seid + urseqn +
- * byte count, duplicated - inflating every summed rate exactly 2x after one
- * extra restart.
+ * usage report was stored N times. The duplicates carry the same supi + seid +
+ * urseqn + byte count, inflating every summed rate exactly 2x after one extra
+ * restart.
  *
- * scripts/monitoring/collect_upf_metrics.py already collapses duplicates in its
+ * scripts/telemetry/collect_upf_metrics.py already collapses duplicates in its
  * aggregation pipeline. The ENGINE handlers did not: ueComm and
  * qosSustainability walked qosmonlist in application code and added every
  * element, so UE_COMMUNICATION's volumes and QOS_SUSTAINABILITY's throughput

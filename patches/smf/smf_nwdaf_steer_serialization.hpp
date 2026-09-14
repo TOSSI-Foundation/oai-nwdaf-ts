@@ -9,8 +9,8 @@
  * decide_for_session() is evaluated PER SESSION, but the path-health signal it
  * consumes is per DNAI. Every session on a degraded path therefore reaches the
  * same verdict in the same polling cycle and they all migrate together - a
- * thundering herd. Measured with 5 UEs: four sessions moved inside one 10 s
- * poll (PROJECT-HISTORY 31.12). The per-session cooldown cannot prevent this,
+ * thundering herd. With 5 UEs, four sessions moved inside one 10 s poll. The
+ * per-session cooldown cannot prevent this,
  * because it is per session and they all fire at once.
  *
  * WHY IT IS A SEPARATE HEADER.

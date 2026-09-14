@@ -52,8 +52,8 @@ type SbiConfig struct {
 		//
 		// WHY THIS EXISTS. qosmonlist grows by one entry per usage report per
 		// PDU session - about one every 5 s here - and nothing ever removed
-		// them. Measured live after 39 h: 17 954 entries in a single ~10 MB
-		// document, of which the 300 s analytics window used 60. The engine
+		// them. After about 39 h of uptime a single document held 17 954 entries
+		// and roughly 10 MB, of which the 300 s analytics window used 60. The engine
 		// selects documents with an $elemMatch on the timestamp but then walks
 		// the WHOLE array in application code (see applyDefaultRecentWindow in
 		// the engine's utils.go, which already records 6.5 s spent scanning

@@ -51,7 +51,7 @@
  * This class performs discovery, the analytics request, parsing and the
  * decision. It does NOT itself send PFCP. Enforcement remains the already
  * proven Route 2 chain (PCF -> SMF -> Update FAR/PDR -> UPF), which is
- * untouched. See docs/PROJECT-HISTORY.md for why: OAI declares
+ * untouched. The reason: OAI declares
  * PDU_SESSION_MODIFICATION_SMF_REQUESTED in smf.h and handles it in
  * smf_procedure.cpp, but nothing anywhere constructs or triggers it, so the
  * SMF has no implemented self-initiated session-modification procedure to
@@ -104,7 +104,7 @@ struct nwdaf_nf_load_t {
  * Table 6.14.3-1 defines, per "DN performance" entry: "> Serving anchor UPF
  * info", "> DNAI" and the "> Performance Data" sub-fields. Only the two
  * traffic-rate sub-fields are represented here because they are the only ones
- * this deployment can measure - see docs/dn-performance-design.md section 4.
+ * this deployment can measure.
  * Average/Maximum Packet Delay and Average Packet Loss Rate are NOT modelled:
  * an unmeasurable field is absent, never zeroed.
  *
@@ -153,7 +153,7 @@ struct nwdaf_dn_perf_t {
    * has_health_ratio is false when the producer sent JSON null. The ratio MUST
    * NOT be read as 0 in that case: an idle path makes no transmit attempt, so
    * it cannot produce a failure, and an idle IMPAIRED path is byte-for-byte
-   * identical to an idle healthy one (measured, PROJECT-HISTORY 28.6).
+   * identical to an idle healthy one (measured).
    */
   std::string health_state      = {};
   double health_ratio           = -1.0;
@@ -290,14 +290,14 @@ class smf_nwdaf_consumer {
   /*
    * Rank the DNAIs the NWDAF reported and pick the best-performing one.
    *
-   * 🔴 READ THIS BEFORE TRUSTING THE RESULT. With one UPF and one active path,
+   * READ THIS BEFORE TRUSTING THE RESULT. With one UPF and one active path,
    * DN_PERFORMANCE can only measure the DNAI a session is ACTUALLY ON. The
    * rates for two DNAIs therefore come from DIFFERENT time windows that
    * carried DIFFERENT offered load. This is a MEASUREMENT and a feedback
    * signal ("did the last steer help?"), NOT a counterfactual and NOT a
    * prediction of how the unused path would perform. A true counterfactual
    * needs concurrently active paths, i.e. multi-UPF - a topology change, not
-   * code. See docs/dn-performance-design.md section 4.1.
+   * code.
    *
    * CLASSIFICATION: the ordering rule below is PROJECT-SPECIFIC decision
    * logic. TS 23.288 clause 6.14.1 defines dnPerfOrderCriter / order /
@@ -348,7 +348,7 @@ class smf_nwdaf_consumer {
    *      unknown load is not zero load.
    *
    * @param [const std::string&] current_dnai: the UPF-CONFIRMED DNAI of this
-   *        session - intent is not truth, see PROJECT-HISTORY 19.7
+   *        session - intent is not truth
    * @param [const std::set<std::string>&] authorized: PCF-authorized DNAIs
    * @param [std::string&] dnai: the DNAI to steer to, set only when true
    * @param [std::string&] reason: human-readable explanation, always set
@@ -487,7 +487,7 @@ class smf_nwdaf_consumer {
   // SAME target and so does nothing against A->B->A oscillation.
   int m_steer_cooldown_sec = 60;
 
-  // GLOBAL STEERING SERIALIZATION (PROJECT-HISTORY 31.12, Improvement 6b).
+  // GLOBAL STEERING SERIALIZATION.
   // At most m_max_steers_per_cycle sessions may move per evaluate_sessions()
   // call, and the poll loop calls that exactly once per poll - so the limit is
   // global to the steering engine, not per session. The existing per-session

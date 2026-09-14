@@ -71,8 +71,7 @@ func main() {
 	// from the deployment config (http_version: 2 here), and cpr then sends
 	// VERSION_2_0_PRIOR_KNOWLEDGE. An HTTP/1.1-only server never answers such
 	// a request, so an SMF consuming Nnwdaf_AnalyticsInfo would simply hang -
-	// the same trap already documented for the PCF in
-	// scripts/nwdaf_steering_controller.py and for the AMF/SMF in
+	// the same trap already documented for the AMF/SMF in
 	// oai-nwdaf-sbi/internal/sbi/utils.go.
 	//
 	// h2c.NewHandler serves prior-knowledge HTTP/2 AND plain HTTP/1.1 on the

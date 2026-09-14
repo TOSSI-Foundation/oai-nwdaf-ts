@@ -207,6 +207,6 @@ echo
 echo "=============================================="
 echo "  $PASS passed, $FAIL failed"
 echo "  NOT covered: runtime steering behaviour."
-echo "  That needs the lab - see README.md sections 7 and 8."
+echo "  That needs the lab - see README.md."
 echo "=============================================="
 [ $FAIL -eq 0 ]

@@ -36,9 +36,9 @@ index d3b0469e..54106609 100644
 +    // sockets against 2 live connections) - after which getaddrinfo() itself
 +    // began to fail and the AMF logged "Could not resolve host: oai-nrf".
 +    //
-+    // Rejecting a legacy spelling from a peer we ship alongside buys nothing;
-+    // accepting it costs one branch. See docs/IMPROVEMENT-ROADMAP.md
-+    // Improvement 1 in the oai-cn5g-nwdaf repo.
++    // Rejecting a legacy spelling from a peer we ship alongside buys nothing
++    // and accepting it costs one branch, so the alias is accepted here rather
++    // than rejected.
 +    o.setValue(ServiceName_anyOf::eServiceName_anyOf::NAMF_COMM);
    } else if (s == "namf-evts") {
      o.setValue(ServiceName_anyOf::eServiceName_anyOf::NAMF_EVTS);

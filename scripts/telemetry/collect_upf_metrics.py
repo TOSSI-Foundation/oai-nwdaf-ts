@@ -10,8 +10,8 @@ privileged/DPDK vpp-upf container - confirmed during discovery), so no change
 to the oai-cn5g-fed deployment is required. Requires passwordless `sudo` for
 `docker inspect`/`cat` against the fed stack's containers (read-only).
 
-Since 2026-09-02 it ALSO collects per-DNAI N6 interface counters from the
-running VPP UPF (PROJECT-HISTORY.md 26). That part is strictly additive and
+It ALSO collects per-DNAI N6 interface counters from the running VPP UPF.
+That part is strictly additive and
 never fatal: if `vppctl` cannot be reached the document is written exactly as
 before, so the NF_LOAD analytic and the traffic-steering engine are unaffected.
 Set UPF_VPP_COUNTERS=0 to disable it entirely.
@@ -109,7 +109,7 @@ def read_memory_current(cgroup_path):
 # PATH. They do not solve the idle-path problem on their own (an idle N6
 # interface reads exactly zero - measured), but they are the only per-DNAI
 # observation available without forking the UPF, which is the project's standing
-# constraint (PROJECT-HISTORY 23.8).
+# constraint.
 #
 # THE MAPPING IS NOT GUESSED. The UPF container's own environment declares
 # IF_n_TYPE / IF_n_NWI / IF_n_DNAI, and VPP names its host interfaces
@@ -135,9 +135,8 @@ VPP_CTL = env("VPP_CTL", "/openair-upf/bin/vppctl")  # NOT on $PATH in the image
 # that gap with the largest defensible statistical margin.
 #
 # The failure direction matters: a false OBSERVED_HEALTHY sends a consumer into
-# a path it knows nothing about (PROJECT-HISTORY 28.6), whereas UNKNOWN is
+# a path it knows nothing about, whereas UNKNOWN is
 # recoverable. When in doubt this floor should go UP, never down.
-# Full derivation in PROJECT-HISTORY.md 30.
 PATH_HEALTH_MIN_ATTEMPTS = int(env("PATH_HEALTH_MIN_ATTEMPTS", "1000"))
 COLLECT_VPP_COUNTERS = env("UPF_VPP_COUNTERS", "1") != "0"
 
@@ -263,7 +262,7 @@ def parse_show_runtime(text):
 # any 3GPP metric - in every impairment run measured, interface `drops`,
 # `lnx_tx_dropped` and `lnx_tx_errors` stayed at exactly zero, so nothing here
 # counts a discarded packet. On a DPDK NIC these counters would not exist in
-# this form. See PROJECT-HISTORY.md 28.
+# this form.
 #
 # WHY /packet AND NOT /second OR AN ABSOLUTE COUNT. Measured across a TBF
 # severity sweep (none/100/50/25/10 Mbit/s), the absolute and per-second counts
@@ -370,8 +369,7 @@ def collect_vpp_dnai_counters():
         # counters with severity "error" (e.g. "good packets decapsulated"), so
         # the predicate is meaningless; and it silently captured only
         # "tx sendto temporary failure" while discarding "tx frame not ready",
-        # which is ~4x larger. Measured characterisation of all three is in
-        # PROJECT-HISTORY.md 28.
+        # which is ~4x larger.
         tx_node = f"{interface}-tx"
         raw["txErrors"] = {
             reason.lower().replace(" ", "_"): count
@@ -521,7 +519,7 @@ def derive_smf_features(smf_collection, window_sec):
                 # divided by THAT, not by this poller's window: SMF emits reports
                 # every ~10s each covering 10s of traffic, so dividing a 10s
                 # accumulation by a 5s poll window inflated every rate ~2x
-                # (measured live: iperf 534 Mbit/s reported as 1124 Mbit/s).
+                # (for example, an iperf 534 Mbit/s load reported as 1124 Mbit/s).
                 # Sessions report in parallel over the same wall-clock period, so
                 # the divisor is one report's duration - never the sum of them.
                 "reportDur": {"$max": "$dur"},

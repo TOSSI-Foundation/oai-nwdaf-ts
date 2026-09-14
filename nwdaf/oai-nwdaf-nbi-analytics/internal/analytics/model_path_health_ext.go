@@ -4,7 +4,7 @@ package analytics
 
 // PathHealthExt - per-DNAI path health from UPF N6 interface counters.
 //
-// ⚠️ VENDOR EXTENSION. This is NOT defined by TS 23.288 or TS 29.520, and it is
+// VENDOR EXTENSION. This is NOT defined by TS 23.288 or TS 29.520, and it is
 // NOT any standard metric. It is deliberately carried under the vendor-prefixed
 // key `oaiPathHealthExt`, OUTSIDE the 3GPP PerfData object, so that it can never
 // be read as avgPacketLossRate / avePacketDelay / maxPacketDelay.
@@ -13,7 +13,7 @@ package analytics
 // the UPF could not hand to the kernel socket - AF_PACKET transmit-side
 // backpressure specific to this VPP-on-veth deployment. It counts stalls, not
 // discarded packets: under every impairment measured, interface drops and Linux
-// tx_dropped/tx_errors stayed at exactly zero (PROJECT-HISTORY 28).
+// tx_dropped/tx_errors stayed at exactly zero.
 //
 // Unlike everything else in DnPerf, this is PATH-scoped rather than
 // session-scoped: it comes from interface counters, not from PFCP usage

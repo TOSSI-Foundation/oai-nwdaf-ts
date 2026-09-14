@@ -139,7 +139,7 @@ test:
 	@echo "           load the ANCHOR only, leave the steerable UEs idle, then"
 	@echo "           make test-rate"
 	@echo
-	@echo "See README.md section 8 (Testing)."
+	@echo "See README.md."
 	@false
 
 # Removes containers and networks but NOT volumes: the NWDAF MongoDB is on an

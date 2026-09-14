@@ -32,8 +32,8 @@
  * "4f4f850a-552e-4a60-9d31-a108271e3daf", was NOT invented - it was the UPF's
  * REAL NF Instance ID at an earlier boot (it is the first entry in the vpp-upf
  * container's own NRF-registration log). It went STALE the moment the UPF
- * restarted and generated a new one, and by 2026-08-25 the NRF no longer held
- * it at all.
+ * restarted and generated a new one, after which the NRF no longer held it at
+ * all.
  *
  * The SMF was configured with the same stale constant, so the clause-6.5.1
  * filter check compared one dangling identifier against another and agreed for

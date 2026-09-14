@@ -137,7 +137,7 @@ smf_nwdaf_consumer& smf_nwdaf_consumer::get_instance() {
  * every existing deployment depends on. Environment variables keep the blast
  * radius of this feature to files that did not exist before, and the feature
  * is off unless SMF_NWDAF_ENABLE is set. This is a deliberate minimal-footprint
- * choice, recorded in docs/PROJECT-HISTORY.md.
+ * choice.
  */
 void smf_nwdaf_consumer::start() {
   m_enabled = env_bool("SMF_NWDAF_ENABLE");
@@ -1194,7 +1194,7 @@ void smf_nwdaf_consumer::evaluate_sessions() {
       if (m_dnperf_rule == "HEALTH") {
         // Read the CONFIRMED DNAI - what the UPF has acknowledged - not the
         // intent. A steer whose PFCP update failed would otherwise look like a
-        // success forever (PROJECT-HISTORY 19.7 item 1).
+        // success forever.
         std::string confirmed = {};
         if (sp->get_session_handler() &&
             sp->get_session_handler()->get_session_graph()) {
@@ -1274,7 +1274,7 @@ void smf_nwdaf_consumer::evaluate_sessions() {
             static_cast<int>(entry.first), best_precedence, list.c_str(),
             chosen.c_str(), reason.c_str());
         // The decision used to end here - computed, authorized, and discarded.
-        // That was PROJECT-HISTORY §16.3's "the loop is open".
+        // That left the loop open.
         if (maybe_trigger_steering(sp, chosen, static_cast<int>(entry.first))) {
           const int64_t now = static_cast<int64_t>(std::time(nullptr));
           ++cycle.steers_this_cycle;
@@ -1330,7 +1330,6 @@ bool smf_nwdaf_consumer::maybe_trigger_steering(
   // Reading the intent means a steer whose PFCP update failed looks like a
   // success forever: intent says the new DNAI, so this check concludes "already
   // there" and never retries, while the UPF keeps forwarding on the old path.
-  // See PROJECT-HISTORY 19.7 item 1.
   const std::string current =
       sp->get_session_handler()->get_session_graph()->get_n6_confirmed_dnai();
   if (current == chosen) {
