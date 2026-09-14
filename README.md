@@ -11,26 +11,24 @@ stays up and keeps its IP address; only the path its traffic takes changes.
 
 ## Contents
 
-| Section | |
-|---|---|
-| [Overview](#overview) |   |
-| [Architecture](#architecture) | Components and data flow |
-| [Steering Modes](#steering-modes) | RATE and HEALTH |
-| [Repository Layout](#repository-layout) | |
-| [Prerequisites](#prerequisites) | |
-| [Install and Verify](#install-and-verify) | |
-| [Build](#build) | |
-| [Deploy](#deploy) | |
-| [UEs and Test Traffic](#ues-and-test-traffic) | |
-| [HEALTH Steering Test](#health-steering-test) | |
-| [RATE Steering Test](#rate-steering-test) | |
-| [Checking the Result](#checking-the-result) | |
-| [Troubleshooting](#troubleshooting) | |
-| [Clean Up](#clean-up) | |
-| [Known Limitations](#known-limitations) | |
-| [Development](#development) | |
-| [Quick Start](#quick-start) | |
-| [Upstream and License](#upstream-and-license) | |
+- [Overview](#overview)
+- [Architecture](#architecture) — Components and data flow
+- [Steering Modes](#steering-modes) — RATE and HEALTH
+- [Repository Layout](#repository-layout)
+- [Prerequisites](#prerequisites)
+- [Install and Verify](#install-and-verify)
+- [Build](#build)
+- [Deploy](#deploy)
+- [UEs and Test Traffic](#ues-and-test-traffic)
+- [HEALTH Steering Test](#health-steering-test)
+- [RATE Steering Test](#rate-steering-test)
+- [Checking the Result](#checking-the-result)
+- [Troubleshooting](#troubleshooting)
+- [Clean Up](#clean-up)
+- [Known Limitations](#known-limitations)
+- [Development](#development)
+- [Quick Start](#quick-start)
+- [Upstream and License](#upstream-and-license)
 
 * * *
 
