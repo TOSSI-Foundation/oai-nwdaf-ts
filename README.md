@@ -1,6 +1,6 @@
 # NWDAF-Driven Traffic Steering on OAI 5G SA
 
-*The NWDAF measures each data-network path, and the SMF acts on it — moving a live PDU
+*The NWDAF measures each data-network path and the SMF acts on it, moving a live PDU
 session between two N6 paths without interrupting the subscriber.*
 
 This repository extends the [OpenAirInterface 5G Core](https://gitlab.eurecom.fr/oai/cn5g)
@@ -11,32 +11,45 @@ stays up and keeps its IP address; only the path its traffic takes changes.
 
 ## Contents
 
-- [Overview](#overview)
-- [Architecture](#architecture) — Components and data flow
-- [Steering Modes](#steering-modes) — RATE and HEALTH
-- [Repository Layout](#repository-layout)
-- [Prerequisites](#prerequisites)
-- [Install and Verify](#install-and-verify)
-- [Build](#build)
-- [Deploy](#deploy)
-- [UEs and Test Traffic](#ues-and-test-traffic)
-- [HEALTH Steering Test](#health-steering-test)
-- [RATE Steering Test](#rate-steering-test)
-- [Checking the Result](#checking-the-result)
-- [Troubleshooting](#troubleshooting)
-- [Clean Up](#clean-up)
-- [Known Limitations](#known-limitations)
-- [Development](#development)
-- [Quick Start](#quick-start)
-- [Upstream and License](#upstream-and-license)
+- [NWDAF-Driven Traffic Steering on OAI 5G SA](#nwdaf-driven-traffic-steering-on-oai-5g-sa)
+  - [Contents](#contents)
+  - [Overview](#overview)
+  - [Architecture](#architecture)
+    - [Modified 5G network functions](#modified-5g-network-functions)
+    - [NWDAF services](#nwdaf-services)
+    - [Host processes](#host-processes)
+    - [How information moves](#how-information-moves)
+  - [Steering Modes](#steering-modes)
+  - [Repository Layout](#repository-layout)
+    - [PCF policies](#pcf-policies)
+  - [Prerequisites](#prerequisites)
+    - [External dependency](#external-dependency)
+    - [Host ports](#host-ports)
+  - [Install and Verify](#install-and-verify)
+  - [Build](#build)
+  - [Deploy](#deploy)
+    - [Confirm the deployment](#confirm-the-deployment)
+  - [UEs and Test Traffic](#ues-and-test-traffic)
+  - [HEALTH Steering Test](#health-steering-test)
+    - [Watching it happen manually](#watching-it-happen-manually)
+  - [RATE Steering Test](#rate-steering-test)
+    - [If every session already starts on one path](#if-every-session-already-starts-on-one-path)
+    - [Running both tests](#running-both-tests)
+  - [Checking the Result](#checking-the-result)
+  - [Troubleshooting](#troubleshooting)
+  - [Clean Up](#clean-up)
+  - [Known Limitations](#known-limitations)
+  - [Development](#development)
+  - [Quick Start](#quick-start)
+  - [Upstream and License](#upstream-and-license)
 
 * * *
 
 ## Overview
 
 A 5G core normally picks a data-network exit point when a session is created and then
-leaves it alone. If that path later degrades, nothing reacts — moving the session
-means tearing it down and building a new one, which the subscriber notices.
+leaves it alone. If that path later degrades, nothing reacts. Moving the session
+then means tearing it down and building a new one, which the subscriber notices.
 
 This project closes that loop. The network measures both paths continuously and moves
 sessions between them while they are running.
@@ -67,8 +80,7 @@ is why the PCF is a required component, not an optional one.
 
 ![System architecture: NWDAF-driven DNAI traffic steering on OAI 5G SA](docs/architecture.png)
 
-*Figure A — `MOD` marks an upstream OAI component modified here, `NEW` a component
-written for this project, `LAB` test scaffolding.*
+*Figure A.System architecture: NWDAF-driven DNAI traffic steering on OAI 5G SA*
 
 ### Modified 5G network functions
 
@@ -91,7 +103,7 @@ Four Go services under [`nwdaf/`](nwdaf/), modified from `oai-cn5g-nwdaf`:
 |---|---|
 | `oai-nwdaf-sbi` | Collects SMF and AMF event exposure |
 | `oai-nwdaf-engine` | Computes the analytics, including `DN_PERFORMANCE` |
-| `oai-nwdaf-nbi-analytics` | Serves `Nnwdaf_AnalyticsInfo` on port 6059 — what the SMF polls |
+| `oai-nwdaf-nbi-analytics` | Serves `Nnwdaf_AnalyticsInfo` on port 6059, which is what the SMF polls |
 | `oai-nwdaf-nbi-events` | Serves `Nnwdaf_EventsSubscription` on port 6060 |
 
 Data is stored in MongoDB (`oai-nwdaf-database`).
@@ -118,7 +130,7 @@ starts them and checks that they came up.
 
 4. Consumption     oai-smf polls oai-nwdaf-nbi-analytics:6059   (every 10 s)
 
-5. Authorization   oai-smf --N7--> oai-pcf returns the authorized DNAI set
+5. Authorization   the DNAI set oai-pcf authorized over N7 at session setup
 
 6. Decision        oai-smf ranks the authorized DNAIs (RATE or HEALTH)
 
@@ -132,7 +144,7 @@ starts them and checks that they came up.
 ## Steering Modes
 
 The SMF supports two ranking rules. You pick one when you start the core, with
-`make core RULE=RATE` or `make core RULE=HEALTH`. They are **mutually exclusive** —
+`make core RULE=RATE` or `make core RULE=HEALTH`. They are **mutually exclusive**:
 the rule is fixed for the life of the SMF container, so each mode needs its own
 `make core`.
 
@@ -140,28 +152,29 @@ the rule is fixed for the life of the SMF container, so each mode needs its own
 |---|---|---|
 | Ranks on | Offered load (`avgTrafficRate`) | Observed path state |
 | Moves sessions | Toward the busier path | Away from a degraded path |
-| Reversible | No — one-way | Yes |
+| Reversible | No, one-way | Yes |
 | Detection window | 300 s average | 5 s |
 | Needs impairment to demonstrate | No | Yes |
 | Extra gate | Confidence floor, unless `SMF_NWDAF_PREDICT_SEC=0` | None |
 | Default | Yes | No |
 
 **RATE** steers toward whichever authorized path carries the most traffic. It is the
-original upstream-style behaviour. Because it always moves toward the busier path, it
-cannot move a session back — once sessions converge on one path, that run is over.
+rule this project implemented first. Because it always moves toward the busier path, it
+cannot move a session back. Once sessions converge on one path, that run is over.
 
 **HEALTH** is the more useful mode. The host collector classifies each path every 5
 seconds as healthy, degraded, or unknown. If the path a session is on is observed
 degraded, the SMF moves it to the best authorized alternative; if the path is healthy
 or unknown, it holds. Unknown is deliberately **not** treated as bad. The SMF also
 remembers recently degraded paths for a short period so sessions do not immediately
-steer back, and moves at most one session per cycle so a path drains gradually.
+steer back. At most one session is steered per evaluation cycle, under either rule, so
+a path drains gradually rather than all at once.
 
 Use **HEALTH** unless you are specifically demonstrating RATE.
 
 Both rules are project-specific. TS 23.288 defines the `DN_PERFORMANCE` analytic; it
 does not define how a consumer ranks DNAIs. Every threshold and timer mentioned here
-is tunable — see [`.env.example`](.env.example).
+is tunable; see [`.env.example`](.env.example).
 
 * * *
 
@@ -192,12 +205,12 @@ is tunable — see [`.env.example`](.env.example).
 
 ### PCF policies
 
-`configs/pcf-policies/` is the PCF's authorization data, in three parts — named PCC
+`configs/pcf-policies/` is the PCF's authorization data, in three parts: named PCC
 rules, the DNAI sets they reference, and a mapping from each subscriber (SUPI) to a
 rule. `make ues` regenerates the subscriber mapping for however many UEs you ask for.
 
 > The PCF loads **every** file in `policy_decisions/`. Never leave a backup copy
-> there — a stale file silently overrides the live one.
+> there, because a stale file silently overrides the live one.
 
 * * *
 
@@ -222,15 +235,15 @@ sudo apt install -y iproute2 python3 python3-venv curl bc git \
 Notes:
 
 * **Compose is not included in `docker.io`.** Without it, `make core` stops immediately.
-* **No Go or C++ toolchain is needed on the host** — every compiler runs in a container.
+* **No Go or C++ toolchain is needed on the host.** Every compiler runs in a container.
 * **Python packages** are handled for you; `make nwdaf` creates a `.venv/` on first run.
 * Allow roughly **8 GB RAM and 40 GB free disk**. The OAI C++ build images are large.
 
 ### External dependency
 
 [`oai-cn5g-fed`](https://gitlab.eurecom.fr/oai/cn5g/oai-cn5g-fed) is required and is
-deliberately not vendored here. It supplies the subscriber database — without it no UE
-can authenticate — and the MySQL health check.
+deliberately not vendored here. It supplies the subscriber database, without which no
+UE can authenticate, and the MySQL health check.
 
 `make build-fed` clones it at a pinned commit and installs this repository's compose
 file, NF configuration and PCF policies into it. Default location `$HOME/oai-cn5g-fed`;
@@ -250,8 +263,9 @@ ss -lntp | grep -E ':(27017|6059|6060|6062|6063)\b' || echo "all free"
 ## Install and Verify
 
 ```bash
-git clone https://github.com/Mragankk/oai-nwdaf-traffic-steering.git
-cd oai-nwdaf-traffic-steering
+git clone -b dnai_traffic_steering \
+  https://github.com/TOSSI-Foundation/oai-nwdaf-ts.git
+cd oai-nwdaf-ts
 ```
 
 Every command in this guide runs from the repository root. Run `make` with no
@@ -270,10 +284,10 @@ while a deployment is live.
 
 Results are reported as PASS, FAIL, SKIP or INFO. **`0 failed` is the only number that
 must be zero.** SKIPs are expected on a fresh clone, because they check things that do
-not exist until you have built — the count of passing checks rises as you build more.
+not exist until you have built. The count of passing checks rises as you build more.
 
 `make verify` proves the repository **builds**. It cannot prove that steering
-**works** — that needs a live deployment and the two runtime tests below.
+**works**; that needs a live deployment and the two runtime tests below.
 
 * * *
 
@@ -282,7 +296,7 @@ not exist until you have built — the count of passing checks rises as you buil
 Nothing is published to a registry, so you must build the images yourself.
 
 The four NWDAF Go services and gnbsim build in about two minutes in total. **The three
-OAI C++ network functions are the slow part** — each is a full from-source build taking
+OAI C++ network functions are the slow part.** Each is a full from-source build taking
 30 minutes to 2 hours, so budget several hours for `make build-nfs` on a first run.
 Everything else (AMF, UPF-VPP, UDM, UDR, AUSF, MySQL, MongoDB) is pulled unmodified.
 
@@ -292,8 +306,8 @@ Build everything in dependency order:
 make build
 ```
 
-Or one stage at a time — recommended on a first run, so you can check the fast parts
-before committing hours to the slow one:
+Or one stage at a time, which is recommended on a first run so you can check the fast
+parts before committing hours to the slow one:
 
 ```bash
 make build-nwdaf      # the four NWDAF Go services     (~2 minutes)
@@ -310,7 +324,7 @@ Notes:
   as it stands and says so, rather than discarding your work.
 * Upstream clones live in `$HOME/oai-src` by default; override with `SRC_DIR`.
 
-Confirm with `make verify` — it should report that every required image tag is present.
+Confirm with `make verify`: it should report that every required image tag is present.
 
 * * *
 
@@ -328,19 +342,19 @@ make ues                  # 3. attach the UEs and the NWDAF SBI
 `make up` runs all three in sequence. If you omit `RULE=`, `make core` asks which rule
 to use.
 
-**Step 1 — `make core`** starts the core with compose, waits for each NF to become
+**Step 1: `make core`** starts the core with compose, waits for each NF to become
 healthy, confirms the PCF is registered in the NRF, replaces the SMF with the steering
 build, and confirms the PFCP association with the UPF. The PCF is started as part of
 this step; there is no separate command and you should not start one by hand.
 
-**Step 2 — `make nwdaf`** starts the NWDAF containers on their own network
+**Step 2: `make nwdaf`** starts the NWDAF containers on their own network
 (`192.168.75.0/24`) and then the two host pollers. Confirm they are running at any time:
 
 ```bash
 pgrep -af 'collect_upf_metrics.py|nwdaf_dn_route_sync.py'
 ```
 
-**Step 3 — `make ues`** generates the PCF policy for each subscriber, restarts the UPF,
+**Step 3: `make ues`** generates the PCF policy for each subscriber, restarts the UPF,
 SMF and PCF, starts the NWDAF SBI, and attaches the UEs one at a time.
 
 ```bash
@@ -350,7 +364,7 @@ make ues UES=3 ANCHORS=1    # 3 UEs: 2 steerable + 1 anchor
 
 **Steerable UEs and anchors.** Steerable UEs start on `internet-primary` and may be
 moved. The last `N_ANCHORS` containers are **anchors**: pinned to `internet-secondary`
-and never steered. The anchor keeps the secondary path measurable — without one, the
+and never steered. The anchor keeps the secondary path measurable. Without one, a
 path no session is using only ever reads unknown, and neither rule has two paths to
 compare.
 
@@ -396,7 +410,7 @@ Three things to keep in mind:
 * **Mind the throughput floor.** Path health needs roughly 2.4 Mbit/s per path before
   it reports anything other than unknown. The 60 Mbit/s default clears this easily.
 * **Mind the ceiling.** The VPP UPF forwards on a single core here, around 683 Mbit/s
-  in total. `make load` warns if the offered load exceeds it.
+  in total. `make load` warns when the offered load approaches it.
 
 To stop all traffic:
 
@@ -411,7 +425,7 @@ done
 ## HEALTH Steering Test
 
 This test degrades one N6 path and proves that the SMF moves a live session onto the
-other one — and that the move is real in the UPF's forwarding state.
+other one, and that the move is real in the UPF's forwarding state.
 
 ```bash
 # 1. Bring the core up with the HEALTH rule.
@@ -433,11 +447,12 @@ make test-health
 Optional parameters: `make test-health WAIT=180 RATE=40mbit` (these are the defaults).
 `WAIT` is how long to wait for a steer, in seconds.
 
-The test checks its prerequisites first, records a baseline, then applies a `tc` rate
-limit to the busiest path inside the UPF's network namespace. The collector sees the
-path degrade within about 5 seconds, the SMF picks an alternative on its next 10-second
-poll and reprograms the UPF, and the test confirms the move by re-reading the UPF's own
-session table. The impairment is removed on **every** exit path, including Ctrl-C.
+The test checks its prerequisites first and records a baseline. It then applies a `tc`
+rate limit, inside the UPF's network namespace, to the N6 interface of whichever path
+is carrying the most sessions. The collector sees that path degrade within about 5
+seconds, the SMF picks an alternative on its next 10-second poll and reprograms the
+UPF, and the test confirms the move by re-reading the UPF's own session table. The
+impairment is removed on **every** exit path, including Ctrl-C.
 
 **PASS requires all four assertions:**
 
@@ -491,7 +506,7 @@ busier one.
 > `0` selects statistics instead of predictions. Statistics carry no confidence, so
 > the floor is never applied and RATE can act as soon as the two paths differ.
 >
-> If you already started the core with the default, you do not have to restart — keep
+> If you already started the core with the default, you do not have to restart. Keep
 > traffic running and re-run `make test-rate` after about five minutes. The test
 > detects this case and says so rather than leaving you guessing.
 
@@ -560,12 +575,12 @@ make ues UES=3 ANCHORS=1
 ```
 
 **Everything has already converged.** RATE only moves sessions one way, so there is no
-route back. `make ues` is the reset — it restarts the UPF, SMF and PCF and re-attaches
+route back. `make ues` is the reset. It restarts the UPF, SMF and PCF and re-attaches
 every UE on the primary path.
 
 ### Running both tests
 
-The two rules **cannot be tested back to back** — the rule is fixed on the SMF
+The two rules **cannot be tested back to back**: the rule is fixed on the SMF
 container, and RATE needs a different traffic shape. `make test` prints exactly this
 and exits non-zero rather than pretending otherwise. Run a full cycle for each:
 
@@ -594,8 +609,8 @@ the UPF's forwarding state is the only authority on what actually happened.
 make status
 ```
 
-This prints one line per session — the SEID, the UE's IP address, and the network
-instance it is forwarding on — plus the current path health and the rule in force.
+This prints one line per session, giving the SEID, the UE's IP address and the network
+instance it is forwarding on, plus the current path health and the rule in force.
 `internet.oai.org.pri` is the primary path, `internet.oai.org.sec` the secondary.
 
 For the same session (same SEID), the network instance must change and the **UE's IP
@@ -615,10 +630,10 @@ make logs
 ```
 
 Look for the path health it received, the per-session `SELECT` of a DNAI, the steering
-cycle summary, and the `Update FAR` it pushed to the UPF. A `HOLD` line means the SMF
-evaluated a session and chose not to move it, with the reason printed after the arrow.
-A steady stream of `HOLD` on healthy paths is correct behaviour, not a fault — HEALTH
-only acts on a path it has observed to be degraded.
+cycle summary, and the `Steering: Update` lines for the FAR and PDR it pushed to the
+UPF. A `HOLD` line means the SMF evaluated a session and chose not to move it, with the
+reason printed after the arrow. A steady stream of `HOLD` on healthy paths is correct
+behaviour, not a fault: HEALTH only acts on a path it has observed to be degraded.
 
 **What the NWDAF published**, as the SMF sees it:
 
@@ -648,7 +663,7 @@ that justifies the choice.
 | **Nothing steers, and there is no error anywhere** | The telemetry collector is not running, so every path reads unknown | `pgrep -af collect_upf_metrics.py`; if empty, re-run `make nwdaf` |
 | SMF logs `HOLD: only one PCF-authorized DNAI` | That subscriber has no steerable policy | `make ues`; check for a stale backup file in `policy_decisions/` |
 | RATE does nothing, SMF mentions a confidence floor | Predictions are rejected until confidence rises | Keep traffic running, or use `SMF_NWDAF_PREDICT_SEC=0` |
-| A path reads unknown although it is impaired | It is idle — an idle impaired path looks identical to an idle healthy one | Start traffic **before** impairing anything |
+| A path reads unknown although it is impaired | It is idle, and an idle impaired path looks identical to an idle healthy one | Start traffic **before** impairing anything |
 | A test that passed yesterday now reads unknown | A `tc` qdisc was left behind | `make unsteer`; both interfaces must read `noqueue` |
 | A steer "works" but the UE loses connectivity | The DN route synchronizer is not running | `pgrep -af nwdaf_dn_route_sync.py` |
 | `docker compose down`: `network has active endpoints` | The SMF and NWDAF containers run outside compose | `make clean` removes them in the right order |
@@ -659,7 +674,7 @@ that justifies the choice.
 
 Listed from least to most destructive.
 
-**Stop test traffic only** — leaves everything deployed and every session in place.
+**Stop test traffic only.** This leaves everything deployed and every session in place.
 
 ```bash
 for c in $(sudo docker ps --format '{{.Names}}' --filter name=gnbsim-vpp); do
@@ -667,13 +682,13 @@ for c in $(sudo docker ps --format '{{.Names}}' --filter name=gnbsim-vpp); do
 done
 ```
 
-**Remove path impairment** — always run this after any test that shaped an interface.
+**Remove path impairment.** Always run this after any test that shaped an interface.
 
 ```bash
 make unsteer
 ```
 
-**Reset the UEs** — recreates all UE containers, restarts the UPF, SMF and PCF, and
+**Reset the UEs.** This recreates all UE containers, restarts the UPF, SMF and PCF, and
 rewrites the PCF policy. Existing sessions are destroyed; the core stays up. Use this
 between test runs, and wait until both paths report `0 bps` first, or decisions are
 made on stale data.
@@ -682,14 +697,14 @@ made on stale data.
 make ues UES=5 ANCHORS=1
 ```
 
-**Switch rule** — recreates the core and the SMF. All sessions are lost.
+**Switch rule.** This recreates the core and the SMF. All sessions are lost.
 
 ```bash
 make core RULE=RATE
 make ues
 ```
 
-**Tear down completely** — stops and removes every container and network.
+**Tear down completely.** This stops and removes every container and network.
 
 ```bash
 make clean
@@ -698,7 +713,7 @@ make clean
 This removes containers and networks but **deliberately not volumes**. The NWDAF
 MongoDB is on an anonymous volume, and `docker compose down -v` would destroy every
 metric ever collected. Run `mongodump` first if the history matters. Afterwards, start
-again from [Deploy](#deploy) — the images do not need rebuilding.
+again from [Deploy](#deploy); the images do not need rebuilding.
 
 * * *
 
@@ -721,8 +736,8 @@ Read this before quoting any result.
   right response differs. Separating them needs a capacity model, which does not exist
   here.
 * **RATE steering is one-way.** It is a ratchet, not a control loop.
-* **Downlink throughput is capped by the UE simulator** — a few Mbit/s, against roughly
-  270 Mbit/s uplink. Do not build a downlink metric on it.
+* **Downlink throughput is capped by the UE simulator**, at a few Mbit/s against
+  roughly 270 Mbit/s uplink. Do not build a downlink metric on it.
 * **The data-network return path is a lab mechanism.** `nwdaf_dn_route_sync.py`
   substitutes for routing that a real deployment would handle with a routing protocol.
   It is not part of 3GPP traffic steering.
@@ -735,8 +750,8 @@ Read this before quoting any result.
 
 | Area | Location |
 |---|---|
-| NWDAF services | `nwdaf/` — Go, built from this repository |
-| OAI network functions | `patches/` — never vendored; each patch names its upstream commit |
+| NWDAF services | `nwdaf/` (Go), built from this repository |
+| OAI network functions | `patches/`, never vendored; each patch names its upstream commit |
 | Deployment topology | `compose/` and `configs/` |
 | Automation | `scripts/` |
 
@@ -771,8 +786,9 @@ the C++ network functions takes hours on a first run.
 
 ```bash
 # clone and verify
-git clone https://github.com/Mragankk/oai-nwdaf-traffic-steering.git
-cd oai-nwdaf-traffic-steering
+git clone -b dnai_traffic_steering \
+  https://github.com/TOSSI-Foundation/oai-nwdaf-ts.git
+cd oai-nwdaf-ts
 make verify
 
 # build
@@ -809,7 +825,7 @@ make clean
 ## Upstream and License
 
 Built on [OpenAirInterface CN5G](https://gitlab.eurecom.fr/oai/cn5g). The OAI network
-functions are **not vendored** — see [`patches/`](patches/) for what changed and against
+functions are **not vendored**; see [`patches/`](patches/) for what changed and against
 which commit. AMF, UPF-VPP, UDR, UDM and AUSF are used unmodified. The NWDAF services
 under `nwdaf/` are modified from `oai-cn5g-nwdaf`.
 
